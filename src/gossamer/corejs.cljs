@@ -10,6 +10,7 @@
 (defn counter
   [props]
   (let [[state set-state!] (g/use-state 1)]
+    (g/use-effect (fn [] (set! (.-title js/document) (str "from effect:" state))) [state])
     (g/create-element :h1 {"onClick" (fn [] (set-state! (fn [c] (inc c))))}
       (str "Count: " state))))
 

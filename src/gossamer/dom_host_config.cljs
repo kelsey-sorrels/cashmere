@@ -4,7 +4,7 @@
 
 (defn update-dom
   [dom prev-props next-props]
-  (log/info "update-dom" dom prev-props next-props)
+  (log/trace "update-dom" dom prev-props next-props)
   ;Remove old or changed event listeners
   (doseq [prop-name (->> prev-props
                       keys
@@ -42,7 +42,7 @@
 (defrecord DomHostConfig []
   g/HostConfig
   (create-instance [this type props root-container-instance host-context internal-instance-handle]
-    (log/info "Creating node" type)
+    (log/trace "Creating node" type)
     (g/update-node this
       (if (= type ::g/TEXT_ELEMENT)
         (.createTextNode js/document "hello")
