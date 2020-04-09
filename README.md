@@ -1,41 +1,41 @@
-# gossamer
+![gossamer logo](./resources/logo.png)
 
 A Clojure React-like based on Rodrigo Pombo's Build Your Own React https://pomb.us/build-your-own-react/
 
 ## Usage
 
 ```clojure
-; create a host config - this defines how host platform works
-(def host-config (dom-host-config))
-
-; create a context reference - this keeps the render state
-(def context-ref (new-context-ref)
-
-; start a render loop - this runs the reconciler in the background
-(def render-loop (work-loop context-ref host-config))
-
 ; component are just functions with take props
 (defn counter
   [props]
-  (let [[state set-state!] (use-state 1)]
-    (create-element :counter {}
-      (str "count: " state))))
+  (let [[state set-state!] (g/use-state 1)]
+    ; Update the window title when the state changes
+    (g/use-effect (fn [] (set! (.-title js/document) (str "from effect:"
+state))) [state])
+    ; Increment state onClick
+    (g/create-element :h1 {"onClick" (fn [] (set-state! (fn [c] (inc c)))
+)}
+      (str "Count: " state))))
 
-; render components (sync blocks until rendering is complete)
-(render-sync
-   render-chan
-   context-ref
-   ; the component to render
-   (create-element counter {})
-   ; the container
-   nil)
+; Create dependencies
+; Host config defines how the platform handels node changes
+; Context contains global state
+(let [host-config (g-dom/host-config)
+      context-ref (g/new-context-ref)]
+  ; Start reconciliation-loop
+  (.requestIdleCallback js/window (g/work-loop context-ref host-config))
+  ; Render the counter component into the "app" container
+  (g/render
+    context-ref
+    (g/create-element counter {})
+    (.getElementById js/document "app")))
 ```
 
 ## Why not use React?
 
 React is great. Use it. If you just want Clojure, try this.
 
-## Refs everywhere? Yuck!
+## Atoms everywhere? Yuck!
 
 Fork it. Fix it.
 
