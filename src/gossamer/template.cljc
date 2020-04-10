@@ -1,7 +1,8 @@
 (ns gossamer.template
   (:require [gossamer.element :as ge]
             [clojure.string]
-            [clojure.walk :refer [prewalk]]))
+            [clojure.walk :refer [prewalk]]
+            [taoensso.timbre :as log]))
 
 ; From reagent.impl.util
 (def dont-camel-case #{"aria" "data"})
@@ -118,8 +119,7 @@
 
 ; FIXME Cache
 (defn kv-conv [o k v]
-  #_(doto o
-    (gobj/set (cached-prop-name k) (convert-prop-value v))))
+  (merge o {(cached-prop-name k) (convert-prop-value v)}))
 
 (defn convert-prop-value [x]
   ; FIXME handle cases
@@ -176,7 +176,7 @@
 
 ;;; Conversion from Hiccup forms
 
-(deftype HiccupTag [tag id className custom])
+(defrecord HiccupTag [tag id className custom])
 
 (defn comp-name
  []
@@ -317,3 +317,53 @@
       (native-element tag v 1)
 
       :else (reag-element tag v))))
+
+(declare expand-seq)
+#_(declare expand-seq-dev)
+
+(defn as-element [x]
+  ; FIXME js
+  (cond #_#_(js-val? x) x
+        (vector? x) (vec-to-elem x)
+        (seq? x) ;(if (dev?)
+                 ;  (expand-seq-dev x)
+                   (expand-seq x)
+        (named? x) (name x)
+        #_#_(satisfies? IPrintWithWriter x) (pr-str x)
+        :else x))
+
+(defn expand-seq [s]
+  (into-array (map as-element s)))
+
+#_(defn expand-seq-dev [s ^clj o]
+  (into-array (map (fn [val]
+                     (when (and (vector? val)
+                                (nil? (key-from-vec val)))
+                       (set! (.-no-key o) true))
+                     (as-element val))
+                   s)))
+
+#_(defn expand-seq-check [x]
+  (let [ctx {}
+        [res derefed] (ratom/check-derefs #(expand-seq-dev x ctx))]
+    (when derefed
+      (warn (hiccup-err x "Reactive deref not supported in lazy seq, "
+                        "it should be wrapped in doall")))
+    (when (.-no-key ctx)
+      (warn (hiccup-err x "Every element in a seq should have a unique :key")))
+    res))
+
+(defn make-element [argv component jsprops first-child]
+  (case (- (count argv) first-child)
+    ;; Optimize cases of zero or one child
+    0 (ge/create-element component jsprops)
+
+    1 (ge/create-element component jsprops
+          (as-element (nth argv first-child nil)))
+
+    (apply ge/create-element
+            (reduce-kv (fn [a k v]
+                         (when (>= k first-child)
+                           (conj a (as-element v)))
+                         a)
+                       [component jsprops] argv))))

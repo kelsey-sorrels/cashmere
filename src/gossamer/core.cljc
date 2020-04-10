@@ -187,11 +187,7 @@
 (defn render
   [context-ref element container]
   ; create fiber for root
-  (let [#_#_element (if (vector? element)
-                  (gt/vec-to-elem element)
-                  element)
-       _ (log/info element)
-       wip-root-ref (new-fiber-ref
+  (let [wip-root-ref (new-fiber-ref
           ; type
           nil
           ;props
@@ -257,14 +253,16 @@
                     (< index (count elements))
                     @old-fiber-ref)
                 (let [newFiber nil
-                      #_ (log/trace "old-fiber-ref" (pp old-fiber-ref))
-                      #_ (log/trace "element\n" (pp element))
+                      _ (log/trace "old-fiber-ref" (pp old-fiber-ref))
+                      _ (log/trace "element\n" (pp element))
+                      element (gt/as-element element)
                       sameType (and
                                  old-fiber-ref
                                  @old-fiber-ref
                                  element 
                                  (= (get element :type) (some-> old-fiber-ref deref :type)))
                       _ (log/trace "same-type" sameType)
+                      _ (log/trace "element" element)
                       new-fiber-ref (cond
                                      sameType
                                        (new-fiber-ref

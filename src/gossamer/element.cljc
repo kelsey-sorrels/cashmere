@@ -1,4 +1,5 @@
-(ns gossamer.element)
+(ns gossamer.element
+  (:require [taoensso.timbre :as log]))
 
 (defrecord Element [type props])
 
@@ -18,7 +19,7 @@
   (Element.
     type
     (assoc
-      props,
+      props
       :children
         (map (fn [child]
                (if-not (string? child)

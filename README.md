@@ -12,10 +12,10 @@ A Clojure React-like based on Rodrigo Pombo's Build Your Own React https://pomb.
     ; Update the window title when the state changes
     (g/use-effect (fn [] (set! (.-title js/document) (str "from effect:"
 state))) [state])
+    ; Built in Hiccup support
     ; Increment state onClick
-    (g/create-element :h1 {"onClick" (fn [] (set-state! (fn [c] (inc c)))
-)}
-      (str "Count: " state))))
+    [:h1 {:on-click (fn [] (set-state! (fn [c] (inc c))))}
+      (str "Count: " state)]))
 
 ; Create dependencies
 ; Host config defines how the platform handels node changes
@@ -27,7 +27,8 @@ state))) [state])
   ; Render the counter component into the "app" container
   (g/render
     context-ref
-    (g/create-element counter {})
+    # Render the root component using Hiccup syntax
+    [counter]
     (.getElementById js/document "app")))
 ```
 
