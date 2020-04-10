@@ -27,7 +27,7 @@ state))) [state])
   ; Render the counter component into the "app" container
   (g/render
     context-ref
-    # Render the root component using Hiccup syntax
+    ; Render the root component using Hiccup syntax
     [counter]
     (.getElementById js/document "app")))
 ```
