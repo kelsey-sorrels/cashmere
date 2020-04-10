@@ -5,7 +5,7 @@ A Clojure React-like based on Rodrigo Pombo's Build Your Own React https://pomb.
 ## Usage
 
 ```clojure
-; component are just functions with take props
+; component are just functions which take props
 (defn counter
   [props]
   (let [[state set-state!] (g/use-state 1)]
@@ -13,7 +13,7 @@ A Clojure React-like based on Rodrigo Pombo's Build Your Own React https://pomb.
     (g/use-effect (fn [] (set! (.-title js/document) (str "from effect:"
 state))) [state])
     ; Built in Hiccup support
-    ; Increment state onClick
+    ; Increment state on click
     [:h1 {:on-click (fn [] (set-state! (fn [c] (inc c))))}
       (str "Count: " state)]))
 
