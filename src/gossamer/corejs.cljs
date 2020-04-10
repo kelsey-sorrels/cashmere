@@ -1,5 +1,6 @@
 (ns gossamer.corejs
   (:require [gossamer.core :as g]
+            [gossamer.element :as ge]
             [gossamer.dom-host-config :as g-dom]
             [taoensso.timbre :as log]))
 
@@ -11,7 +12,7 @@
   [props]
   (let [[state set-state!] (g/use-state 1)]
     (g/use-effect (fn [] (set! (.-title js/document) (str "from effect:" state))) [state])
-    (g/create-element :h1 {"onClick" (fn [] (set-state! (fn [c] (inc c))))}
+    (ge/create-element :h1 {"onClick" (fn [] (set-state! (fn [c] (inc c))))}
       (str "Count: " state))))
 
 (let [host-config (g-dom/host-config)
@@ -23,7 +24,8 @@
   (.requestIdleCallback js/window (g/work-loop context-ref host-config))
   (g/render
 	context-ref
-	(g/create-element counter {})
+	#_[counter {}]
+	(ge/create-element counter {})
 	(.getElementById js/document "app")))
 
 (defn on-js-reload []

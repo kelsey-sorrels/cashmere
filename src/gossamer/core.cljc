@@ -1,5 +1,6 @@
 (ns gossamer.core
-  (:require [clojure.string]
+  (:require [gossamer.template :as gt]
+            [clojure.string]
             #?(:clj [clojure.core.async :as async :refer [<! >! <!! >!! timeout chan alt! go go-loop]]
                :cljs [clojure.core.async :as async :refer [<! >! timeout chan alt! go go-loop]])
             [clojure.pprint]
@@ -9,48 +10,11 @@
   [x]
   (with-out-str (clojure.pprint/pprint x)))
 
-(defrecord Element [type props])
-
-(defn create-text-element
-  [text]
-  (Element.
-    ::TEXT_ELEMENT
-    {
-      "nodeValue" text
-      :children []
-    }))
-
-; public
-(defn create-element
-  [type props & children]
-  {:pre [type props]}
-  (Element.
-    type
-    (assoc
-      props,
-      :children
-        (map (fn [child]
-               (if-not (string? child)
-                 child
-                 (create-text-element child)))
-          children))))
-
 (defprotocol HostConfig
   (create-instance [this type props root-container-instance host-context internal-instance-handle])
   (create-node [this node parent])
   (update-node [this node prev-props next-props])
   (delete-node [this node parent]))
-
-(defn createDom
-  [host-config fiber-ref]
-  (let [dom (if (= (:type @fiber-ref) ::TEXT_ELEMENT)
-                {:type :text-dom
-                 :props (:props @fiber-ref)}
-                {:type (:type @fiber-ref)
-                 :props (:props @fiber-ref)}
-            )]
-    (update-node host-config dom {} (:props @fiber-ref))
-    dom))
 
 (defn event?
   [key]
@@ -223,7 +187,11 @@
 (defn render
   [context-ref element container]
   ; create fiber for root
-  (let [wip-root-ref (new-fiber-ref
+  (let [#_#_element (if (vector? element)
+                  (gt/vec-to-elem element)
+                  element)
+       _ (log/info element)
+       wip-root-ref (new-fiber-ref
           ; type
           nil
           ;props
@@ -284,7 +252,7 @@
         (first
           (reduce
             (fn [[context index old-fiber-ref prev-sibling-ref] element]
-              (assert (instance? Element element) element)
+              #_(assert (instance? Element element) element)
               (if (or
                     (< index (count elements))
                     @old-fiber-ref)

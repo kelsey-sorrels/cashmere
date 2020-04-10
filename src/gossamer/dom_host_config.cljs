@@ -1,5 +1,6 @@
 (ns gossamer.dom-host-config
   (:require [gossamer.core :as g]
+            [gossamer.element :as ge]
             [taoensso.timbre :as log]))
 
 (defn update-dom
@@ -20,7 +21,6 @@
                       keys
                       (filter g/property?)
                       (filter (g/gone? prev-props next-props)))]
-    ; FIXME dom[name] = ""
     (aset dom prop-name ""))
 
   ; Set new or changed properties
@@ -44,7 +44,7 @@
   (create-instance [this type props root-container-instance host-context internal-instance-handle]
     (log/trace "Creating node" type)
     (g/update-node this
-      (if (= type ::g/TEXT_ELEMENT)
+      (if (= type ::ge/TEXT_ELEMENT)
         (.createTextNode js/document "hello")
         (.createElement js/document (some-> type name)))
       {}
