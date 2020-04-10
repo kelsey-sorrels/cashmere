@@ -18,7 +18,7 @@ state))) [state])
       (str "Count: " state)]))
 
 ; Create dependencies
-; Host config defines how the platform handels node changes
+; Host config defines how the platform handles node changes
 ; Context contains global state
 (let [host-config (g-dom/host-config)
       context-ref (g/new-context-ref)]
