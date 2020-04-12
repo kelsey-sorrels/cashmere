@@ -101,9 +101,10 @@
 ;;; Props conversion
 
 (defn cache-get [o k]
-  (when ^boolean (.hasOwnProperty o k)
+  nil)
+  ;(when ^boolean (.hasOwnProperty o k)
     ; FIXME use cache
-    #_(gobj/get o k)))
+    ;(gobj/get o k)))
 
 (defn cached-prop-name [k]
   (if (named? k)
@@ -216,11 +217,10 @@
 
 (defn reag-element [tag v]
   (let [c (as-class tag)
-        jsprops {}]
-    (set! (.-argv jsprops) v)
-    (when-some [key (key-from-vec v)]
-      (set! (.-key jsprops) key))
-    ; FIXME - do the thing
+        key (key-from-vec v)
+        jsprops (cond-> {:argv v}
+                  key (merge {:key key}))]
+        
     (ge/create-element c jsprops)))
 
 (defn fragment-element [argv]

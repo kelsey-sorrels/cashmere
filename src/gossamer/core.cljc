@@ -1,5 +1,6 @@
 (ns gossamer.core
-  (:require [gossamer.template :as gt]
+  (:require [gossamer.host-config :as ghc]
+            [gossamer.template :as gt]
             [clojure.string]
             #?(:clj [clojure.core.async :as async :refer [<! >! <!! >!! timeout chan alt! go go-loop]]
                :cljs [clojure.core.async :as async :refer [<! >! timeout chan alt! go go-loop]])
@@ -9,12 +10,6 @@
 (defn pp
   [x]
   (with-out-str (clojure.pprint/pprint x)))
-
-(defprotocol HostConfig
-  (create-instance [this type props root-container-instance host-context internal-instance-handle])
-  (create-node [this node parent])
-  (update-node [this node prev-props next-props])
-  (delete-node [this node parent]))
 
 (defn event?
   [key]
@@ -37,12 +32,12 @@
     (not (contains? next key))))
 
 (defn commit-deletion
-  [host-config fiber-ref domParent]
+  [host-config fiber-ref dom-parent]
   (if-let [dom (some-> fiber-ref deref :dom)]
     ;domParent.removeChild(fiber.dom)
-    (delete-node host-config dom domParent)
+    (ghc/remove-child-from-container host-config dom-parent dom)
     ; commit deletion of :child
-    (commit-deletion host-config (some-> fiber-ref deref :child-ref) domParent)))
+    (commit-deletion host-config (some-> fiber-ref deref :child-ref) dom-parent)))
 
 (defn cancel-effects
   [fiber-ref]
@@ -84,28 +79,42 @@
       (let [recurse (cond
                       (= (some-> fiber-ref deref :effectTag) "PLACEMENT")
                         (do
-                          (when (some-> fiber-ref deref :dom)
+                          (when-let [dom (some-> fiber-ref deref :dom)]
+                            (log/info "host-config" host-config)
                             ; Place dom
-                            (create-node host-config (some-> fiber-ref deref :dom) domParent))
+                            (ghc/append-child-to-container
+                              host-config
+                              domParent
+                              dom))
                           (run-effects fiber-ref)
                           true)
                       (= (some-> fiber-ref deref :effectTag) "UPDATE")
                         (do
                           (cancel-effects fiber-ref)
                           (when (some-> fiber-ref deref :dom)
+                            (log/info "commit-update" 
+                              (some-> fiber-ref deref :alternate-ref :props)
+                              (some-> fiber-ref deref :props))
                             ; update dom
-                            (update-node
+                            (ghc/commit-update
                               host-config
                               (some-> fiber-ref deref :dom)
+                              nil
+                              (some-> fiber-ref deref :type)
                               (some-> fiber-ref deref :alternate-ref :props)
-                              (some-> fiber-ref deref :props)))
+                              (some-> fiber-ref deref :props)
+                              ; finished work
+                              nil))
                           (run-effects fiber-ref)
                           true)
                       (= (some-> fiber-ref deref :effectTag) "DELETION")
                         ; delete
                         (do
                           (cancel-effects fiber-ref)
-                          (commit-deletion host-config fiber-ref domParent)
+                          (ghc/remove-child-from-container
+                            host-config
+                            (some-> fiber-ref deref :dom)
+                            domParent)
                           ; don't recurse after deletions
                           false)
                       :else
@@ -261,8 +270,8 @@
                                  @old-fiber-ref
                                  element 
                                  (= (get element :type) (some-> old-fiber-ref deref :type)))
-                      _ (log/trace "same-type" sameType)
-                      _ (log/trace "element" element)
+                      _ (log/info "same-type" sameType)
+                      _ (log/info "element" element)
                       new-fiber-ref (cond
                                      sameType
                                        (new-fiber-ref
@@ -327,7 +336,7 @@
   new-context))))
 
 (def ^:dynamic *context-ref* nil)
-(defn updateFunctionComponent
+(defn update-function-component
   [context-ref fiber-ref]
   {:post [@context-ref]}
   (binding [*context-ref* context-ref]
@@ -342,24 +351,26 @@
         fiber-ref
         (or children [])))))
 
-(defn updateHostComponent
+(defn update-host-component
   [host-config context-ref fiber-ref]
   {:pre [@context-ref]
    :post [@context-ref]}
   ;(log/trace "update-host-component:\n" (-> fiber-ref deref pp))
+  (log/info "update-host-component" host-config)
   (when-not (-> fiber-ref deref :dom)
     (swap! fiber-ref
       (fn [fiber]
         (assoc fiber :dom
-          (create-instance host-config
-                       (:type fiber)
-                       (:props fiber)
-                       ; root-container-instance
-                       nil
-                       ; host-context
-                       nil
-                       ; internal-instance-handle
-                       nil)))))
+          (ghc/create-instance
+             host-config
+             (:type fiber)
+             (:props fiber)
+             ; root-container-instance
+             nil
+             ; host-context
+             nil
+             ; internal-instance-handle
+             nil)))))
   (reconcileChildren
     context-ref
     fiber-ref
@@ -373,8 +384,8 @@
   ;(log/trace "perform-unit-of-work working on fiber:\n" (-> fiber-ref deref pp))
   (let [isFunctionComponent (fn? (-> fiber-ref deref :type))]
     (if isFunctionComponent
-      (updateFunctionComponent context-ref fiber-ref)
-      (updateHostComponent host-config context-ref fiber-ref))
+      (update-function-component context-ref fiber-ref)
+      (update-host-component host-config context-ref fiber-ref))
     (log/trace "perform-unit-of-work calculating next fiberChild")
     (if-let [fiberChild (some-> fiber-ref deref :child-ref)]
       (do

@@ -1,11 +1,12 @@
 (ns gossamer.dom-host-config
   (:require [gossamer.core :as g]
             [gossamer.element :as ge]
+            [gossamer.host-config :as ghc]
             [taoensso.timbre :as log]))
 
 (defn update-dom
   [dom prev-props next-props]
-  (log/trace "update-dom" dom prev-props next-props)
+  (log/info "update-dom" dom prev-props next-props)
   ;Remove old or changed event listeners
   (doseq [prop-name (->> prev-props
                       keys
@@ -40,21 +41,70 @@
   dom)
 
 (defrecord DomHostConfig []
-  g/HostConfig
+  ghc/HostConfig
+  (get-public-instance [this] nil)
+  (get-root-host-context [this next-root-instance] nil)
+  (get-child-host-context [this parent-context fiber-type root-instance] nil)
+  (prepare-for-commit [this root-container-instance] nil)
+  (reset-after-commit [this root-container-instance] nil)
   (create-instance [this type props root-container-instance host-context internal-instance-handle]
     (log/trace "Creating node" type)
-    (g/update-node this
+    (update-dom
       (if (= type ::ge/TEXT_ELEMENT)
         (.createTextNode js/document "hello")
         (.createElement js/document (some-> type name)))
       {}
       props))
-  (create-node [this node parent]
-    (.appendChild parent node))
-  (update-node [this node prev-props next-props]
-    (update-dom node prev-props next-props))
-  (delete-node [this node parent]
-    (.removeChild parent node )))
+  (append-initial-child [this parent child] nil)
+  (finalize-initial-children [this instance type new-props root-container-instance current-host-context] nil)
+  (prepare-update [this instance type old-props new-props root-container-instance current-host-context] nil)
+  (should-set-text-content [this type next-props] nil)
+  (should-deprioritize-subtree [this] nil)
+  (create-text-instance [this new-text root-cotnainer-instance current-host-context work-in-progress] nil)
+  (schedule-timeout [this] nil)
+  (cancel-timeout [this] nil)
+  (no-timeout [this] nil)
+  (now [this] nil)
+  (is-primary-renderer [this] nil)
+  (warns-if-not-acting [this] nil)
+  (supports-mutation [this] nil)
+  (supports-persistence [this] nil)
+  (supports-hydration [this] nil)
+  (get-fundamental-component-instance [this] nil)
+  (mount-fundamental-component [this] nil)
+  (should-update-fundamental-component [this] nil)
+  (get-instance-from-node [this] nil)
+  (before-remove-instance [this] nil)
+  (register-event [this] nil)
+  (mount-event-listener [this] nil)
+  (unmount-event-listener [this] nil)
+  (validate-event-listener-target [this] nil)
+  (is-opaque-hydrating-object [this] nil)
+  (make-opaque-hydrating-object [this] nil)
+  (make-client-id [this] nil)
+  (make-client-id-in-dev [this] nil)
+  (make-server-id [this] nil)
+
+  ghc/MutationHostConfig
+  (append-child [this parent-instance child] nil)
+  (append-child-to-container [this parent child]
+    (.appendChild parent child))
+  (commit-text-update [this text-instance old-text new-test] nil)
+  (commit-mount [this dom-element type new-props fiber-node] nil)
+  (commit-update [this instance update-payload type old-props new-props finished-work]
+    (update-dom instance old-props new-props))
+  (insert-before [this parent-instance child before-child] nil)
+  (insert-in-container-before [this child before-child] nil)
+  (remove-child [this parent-instance child] nil)
+  (remove-child-from-container [this node parent]
+    (.removeChild parent node))
+  (reset-text-content [this dom-element] nil)
+  (hide-instance [this] nil)
+  (hide-text-instance [this] nil)
+  (unhide-instance [this] nil)
+  (unhide-text-instance [this] nil)
+  (update-fundamental-component [this] nil)
+  (unmount-fundamental-component [this] nil))
 
 (defn host-config
   []
