@@ -5,6 +5,7 @@
             :url "https://www.eclipse.org/legal/epl-2.0/"}
   :dependencies [[org.clojure/clojure "1.10.1"]
                  [org.clojure/core.async "0.7.559"]
+                 [org.graalvm.js/js "20.0.0"]
                  [com.taoensso/timbre "4.10.0"]]
   :repl-options {:init-ns gossamer.core}
   :plugins [[lein-figwheel "0.5.19"]

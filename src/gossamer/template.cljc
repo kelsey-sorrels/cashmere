@@ -1,11 +1,12 @@
 (ns gossamer.template
-  (:require [gossamer.element :as ge]
-            [clojure.string]
+  (:require [clojure.string]
             [clojure.walk :refer [prewalk]]
             [taoensso.timbre :as log]))
 
 ; From reagent.impl.util
 (def dont-camel-case #{"aria" "data"})
+
+(def ^:dynamic *create-element*)
 
 (defn capitalize [s]
   (if (< (count s) 2)
@@ -221,7 +222,7 @@
         jsprops (cond-> {:argv v}
                   key (merge {:key key}))]
         
-    (ge/create-element c jsprops)))
+    (*create-element* c jsprops)))
 
 (defn fragment-element [argv]
   (let [props (nth argv 1 nil)
@@ -356,12 +357,12 @@
 (defn make-element [argv component jsprops first-child]
   (case (- (count argv) first-child)
     ;; Optimize cases of zero or one child
-    0 (ge/create-element component jsprops)
+    0 (*create-element* component jsprops)
 
-    1 (ge/create-element component jsprops
+    1 (*create-element* component jsprops
           (as-element (nth argv first-child nil)))
 
-    (apply ge/create-element
+    (apply *create-element*
             (reduce-kv (fn [a k v]
                          (when (>= k first-child)
                            (conj a (as-element v)))

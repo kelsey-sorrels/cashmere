@@ -1,5 +1,6 @@
 (ns gossamer.corejs
   (:require [gossamer.core :as g]
+            [gossamer.context :as gc]
             [gossamer.element :as ge]
             [gossamer.dom-host-config :as g-dom]
             [taoensso.timbre :as log]))
@@ -11,15 +12,13 @@
 (defn counter
   [props]
   (let [[state set-state!] (g/use-state 1)]
-    (g/use-effect (fn [] (set! (.-title js/document) (str "from effect:" state))) [state])
+    (g/use-effect (fn [] (set! (.-title js/document)
+                               (str "from effect:" state))) [state])
     [:h1 {:on-click (fn [] (set-state! (fn [c] (inc c))))}
       (str "Count: " state)]))
 
 (let [host-config (g-dom/host-config)
-	  context-ref (g/new-context-ref)
-	  render-chan (g/work-loop
-					context-ref
-					host-config)]
+	  context-ref (gc/new-context-ref)]
   ; start render-loop
   (.requestIdleCallback js/window (g/work-loop context-ref host-config))
   (g/render
