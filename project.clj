@@ -5,13 +5,28 @@
             :url "https://www.eclipse.org/legal/epl-2.0/"}
   :dependencies [[org.clojure/clojure "1.10.1"]
                  [org.clojure/core.async "0.7.559"]
-                 [org.graalvm.js/js "20.0.0"]
+                 [org.clojure/core.cache "1.0.207"]
+                 [org.graalvm.js/js "20.1.0"]
+                 [criterium "0.4.5"]
                  [com.taoensso/timbre "4.10.0"]]
   :repl-options {:init-ns gossamer.core}
   :plugins [[lein-figwheel "0.5.19"]
             [lein-cljsbuild "1.1.7" :exclusions [[org.clojure/clojure]]]]
 
   :source-paths ["src"]
+
+  :java-cmd "/home/santos/Downloads/graalvm-ce-java11-20.1.0/bin/java"
+  :jvm-opts ["-Xdebug"
+             "-XX:+UnlockExperimentalVMOptions"
+             "-XX:+EnableJVMCI"
+             "-XX:+EagerJVMCI"
+             "-XX:+UseJVMCICompiler"
+             "-XX:-OmitStackTraceInFastThrow"
+             #_"-Dgraal.TraceTruffleCompilation=true"
+             #_"-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=1044"]
+
+  :resource-paths ["src/node_modules"
+                   "/home/santos/Downloads/graalvm-ce-java11-20.1.0/tools/chromeinspector/chromeinspector.jar"]
 
   :cljsbuild {:builds
               [{:id "dev"

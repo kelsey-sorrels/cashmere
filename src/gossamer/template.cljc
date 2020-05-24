@@ -1,6 +1,7 @@
 (ns gossamer.template
   (:require [clojure.string]
             [clojure.walk :refer [prewalk]]
+            [clojure.core.cache :as cache]
             [taoensso.timbre :as log]))
 
 ; From reagent.impl.util
@@ -32,10 +33,11 @@
 
 (defn fun-name [f]
   (let [n (or (and (fn? f)
-                   (or (.-displayName f)
-                       (let [n (.-name f)]
-                         (if (and (string? n) (seq n))
-                           n))))
+                   (let [m (meta f)]
+                     (or (:display-name m)
+                         (let [n (:name m)]
+                           (if (and (string? n) (seq n))
+                             n)))))
               (and (satisfies? clojure.lang.Named f)
                    (name f))
               (let [m (meta f)]
@@ -74,9 +76,10 @@
            (class-names a b)
            rst)))
 
-(def prop-name-cache {:class "className"
-                      :for "htmlFor"
-                      :charset "charSet"})
+(def prop-name-cache (atom (cache/fifo-cache-factory {
+  :class "className"
+  :for "htmlFor"
+  :charset "charSet"})))
 
 (declare as-element)
 
@@ -102,24 +105,19 @@
 ;;; Props conversion
 
 (defn cache-get [o k]
-  nil)
-  ;(when ^boolean (.hasOwnProperty o k)
-    ; FIXME use cache
-    ;(gobj/get o k)))
+  (get o k))
 
 (defn cached-prop-name [k]
   (if (named? k)
     (if-some [k' (cache-get prop-name-cache (name k))]
       k'
       (let [v (dash-to-prop-name k)]
-        ; FIXME use cache
-        ;(gobj/set prop-name-cache (name k) v)
+        (swap! prop-name-cache cache/through-cache (name k) (constantly v))
         v))
     k))
 
 (declare convert-prop-value)
 
-; FIXME Cache
 (defn kv-conv [o k v]
   (merge o {(cached-prop-name k) (convert-prop-value v)}))
 
@@ -153,8 +151,8 @@
   "Takes the id and class from tag keyword, and adds them to the
   other props. Parsed tag is JS object with :id and :class properties."
   [props id-class]
-  (let [id (.-id id-class)
-        class (.-className id-class)]
+  (let [id (:id id-class)
+        class (:className id-class)]
     (cond-> props
       ;; Only use ID from tag keyword if no :id in props already
       (and (some? id)
@@ -170,9 +168,11 @@
         props (-> props
                   (cond-> class (assoc :class (class-names class)))
                   (set-id-class id-class))]
-    (if (.-custom id-class)
+    (if (:custom id-class)
       (convert-custom-prop-value props)
       (convert-prop-value props))))
+
+(def ^:dynamic *convert-props* convert-props)
 
 (declare make-element)
 
@@ -195,7 +195,7 @@
                  className
                  ;; Custom element names must contain hyphen
                  ;; https://www.w3.org/TR/custom-elements/#custom-elements-core-concepts
-                 (not= -1 (.indexOf tag "-")))))
+                 (clojure.string/includes? tag "-"))))
 
 (defn try-get-key [x]
   ;; try catch to avoid clojurescript peculiarity with
@@ -221,7 +221,6 @@
         key (key-from-vec v)
         jsprops (cond-> {:argv v}
                   key (merge {:key key}))]
-        
     (*create-element* c jsprops)))
 
 (defn fragment-element [argv]
@@ -230,8 +229,9 @@
         jsprops (or (convert-prop-value (if hasprops props))
                     {})
         first-child (+ 1 (if hasprops 1 0))]
-    (when-some [key (key-from-vec argv)]
-      (set! (.-key jsprops) key))
+    ; FIXME how to set this?
+    #_(when-some [key (key-from-vec argv)]
+      (set! (:key jsprops) key))
     ; FIXME remove nil, use react/Fragment equivalent
     (make-element argv nil #_react/Fragment jsprops first-child)))
 
@@ -239,30 +239,31 @@
   [c]
   (->NativeWrapper c nil nil))
 
-(def tag-name-cache {})
+(def tag-name-cache (atom (cache/fifo-cache-factory {})))
 
 (defn cached-parse [x]
   (if-some [s (cache-get tag-name-cache x)]
     s
     (let [v (parse-tag x)]
-      ; FIXME use cache?
-      ;(gobj/set tag-name-cache x v)
+      (swap! tag-name-cache cache/through-cache x (constantly v))
       v)))
 
 (defn native-element [parsed argv first]
   (let [component (:tag parsed)
         props (nth argv first nil)
         hasprops (or (nil? props) (map? props))
-        jsprops (or (convert-props (if hasprops props) parsed)
+        jsprops (or (*convert-props* (if hasprops props) parsed)
                     {})
         first-child (+ first (if hasprops 1 0))]
+    (log/trace "native-element" component jsprops)
     ;(if (input-component? component)
     ;  (-> [(reagent-input) argv component jsprops first-child]
     ;      (with-meta (meta argv))
     ;      as-element)
       (do
-        (when-some [key (-> (meta argv) get-key)]
-          (set! (.-key jsprops) key))
+        ; FIXME how to set this?
+        #_(when-some [key (-> (meta argv) get-key)]
+          (set! (:key jsprops) key))
         (make-element argv component jsprops first-child))))
 ;)
 
@@ -274,8 +275,9 @@
     (str (prewalk (fn [x]
                     (if (fn? x)
                       (let [n (fun-name x)]
-                        (case n
-                          ("" nil) x
+                        (if (or (= ""  n)
+                                (nil? n))
+                          x
                           (symbol n)))
                       x)) coll))
     (str coll)))
@@ -298,7 +300,7 @@
       (fragment-element v)
 
       (hiccup-tag? tag)
-      (let [n (name tag)
+      (let [n (str tag)
             pos (.indexOf n ">")]
         (case pos
           -1 (native-element (cached-parse n) v 1)
@@ -355,7 +357,8 @@
     res))
 
 (defn make-element [argv component jsprops first-child]
-  (case (- (count argv) first-child)
+  (log/trace "make-element" component argv)
+  (case (int (- (count argv) first-child))
     ;; Optimize cases of zero or one child
     0 (*create-element* component jsprops)
 
@@ -364,7 +367,8 @@
 
     (apply *create-element*
             (reduce-kv (fn [a k v]
-                         (when (>= k first-child)
-                           (conj a (as-element v)))
-                         a)
+                         (if (>= k first-child)
+                           (conj a (as-element v))
+                           a))
                        [component jsprops] argv))))
+
