@@ -3,7 +3,8 @@
             [criterium.core :as cc]
             [taoensso.timbre :as log]
             [clojure.inspector]
-            [clojure.java.io])
+            [clojure.java.io]
+            [clojure.core.async :refer [chan go go-loop sliding-buffer <!! <! >! >!!]])
   (:import (org.graalvm.polyglot Context Context$Builder PolyglotException Source Value)
            (org.graalvm.polyglot.proxy ProxyArray ProxyExecutable ProxyObject)))
 
@@ -362,7 +363,7 @@
   {
     "getRootHostContext" (fn getRootHostContext [next-root-instance] {})
     "prepareForCommit" (fn prepareForCommit [& args] #_(log/trace "prepareForCommit" args))
-    "resetAfterCommit" (fn resetAfterCommit [& args] #_(log/trace "resetAfterCommit" args))
+    "resetAfterCommit" (fn resetAfterCommit [& args] (log/info "resetAfterCommit" args))
     "getChildHostContext" (fn getChildHostContext [& args] #_(log/trace "getChildHostContext" args) {})
     "shouldSetTextContent" (fn shouldSetTextContent [element-type next-props]
       #_(log/trace "shouldSetTextContent" element-type (type element-type) props)
@@ -373,6 +374,7 @@
       [(keyword type) props (atom [])])
     "createTextInstance" (fn createTextInstance [new-text root-container-instance host-context work-in-progress] new-text)
     "supportsPersistence" true
+    ;; Persistence API
     "appendInitialChild" (fn appendInitialChild [parent child]
       #_(log/trace "appendInitialChild" parent child)
       (-> parent (nth 2) (swap! conj child)))
@@ -406,10 +408,9 @@
          (nth currentInstance 2)
          (atom []))])})
 
-;(log/trace "host-config" host-config)
-
 (defn context
-  ([] (context default-host-config))
+  ([]
+    (context default-host-config))
   ([host-config]
    {:post [(some? %)]}
   (try
@@ -431,6 +432,7 @@
         (.getBindings language-id)
         (.putMember "hostConfig" (clj-map->value (merge default-host-config host-config))))
       (assert context)
+      ;; Adapted from https://blog.atulr.com/react-custom-renderer-1/
       (.eval context language-id
         "
         load({'name': 'jvm_npm', 'script': jvm_npm_source});
@@ -453,7 +455,7 @@
               element,
               container,
               parentComponent,
-              function (context) { return null;}); //callback(context, null);});
+              function (context) { callback(context, container);});
           },
         }
         module.exports = Renderer")
@@ -479,7 +481,7 @@
       (execute-fn *context* "Renderer.render"
         element
         container
-        (or callback (fn default-callback [& more] (log/trace "default callback" more)))))))
+        (clj->value (or callback (fn default-callback [& more] (log/trace "default callback" more))))))))
 
 (defn create-element
   [component props & children]
@@ -509,12 +511,17 @@
 
 (defmacro with-context
   [& body]
-  `(binding [*context* (context)
-             gt/*create-element* create-element
-             gt/*convert-props* (fn [props# id-class#]
-                                  (props->value props#))]
-     (assert *context*)
-     ~@body))
+  `(let [render-chan# (chan (sliding-buffer 2))]
+     (binding [*context* (context {"resetAfterCommit" (fn [container#]
+                                                        (>!! render-chan# (-> container# deref first)))})
+               gt/*create-element* create-element
+               gt/*convert-props* (fn [props# id-class#]
+                                    (props->value props#))]
+       (assert *context*)
+       ~@body)
+     render-chan#))
+
+
 
 (defmacro defcomponent
   [compname args & body]
@@ -597,43 +604,45 @@
 ;; Demo Section
 (def once (atom false))
 
+(defn thread-name
+  []
+  (.getName (Thread/currentThread)))
+
 (defcomponent TestComponent
   [props context]
-  (log/info "TestComponent" props context)
+  (log/trace "TestComponent" props context (thread-name))
   (let [[s set-s!] (use-state 0)]
     (use-effect
       (fn []
-        (log/info "in effect s:" s "once:" @once)
+        (log/trace "in effect s:" s "once:" @once (thread-name))
         (future
-          (Thread/sleep 1)
+          (log/trace "in future" (thread-name))
           (if-not @once
             (do
-              (log/info "setting s")
+              (log/trace "setting s")
               (set-s! (inc s))
               (reset! once true))
             (do
-              ; FIXME: should never get here but does
+              ; should never get here
               (log/error "ERROR: this should never be called")
               (assert false)))))
       
       [])
+  (log/info "TestComponent end" props context s (thread-name))
     [:ul {:key "ul"}
      [:li {:key "li"} (str s)]]))
 
 (defn -main [& args]
   (try
-    (let [container (atom [])]
-      (with-context
-        ;(cc/bench
-          (log/info "=== Rendering ===")
-          (render TestComponent {} container)
-          (Thread/sleep 2)
-          (log/info "=== Rendering ===")
-          (render TestComponent {} container)
-          ;(Thread/sleep 100)
-          ;(log/info "=== Rendering ===")
-          ;(render TestComponent {} container)
-        (log/info "container after render" container (-> container deref first clj-elements))))
+    (let [render-chan (with-context
+        (log/info "=== Rendering ===")
+        (render TestComponent {}))]
+      ; Listen for renders and print them out
+      (go-loop []
+        (let [container (<! render-chan)]
+          (log/info "=== Render Callback ===")
+          (log/info "container" (-> container clj-elements)))
+        (recur)))
     (catch PolyglotException pe
       (log/error (.getPolyglotStackTrace pe)))
     (catch Exception e
