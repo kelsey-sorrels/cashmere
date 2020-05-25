@@ -510,18 +510,22 @@
     element))
 
 (defmacro with-context
-  [& body]
-  `(let [render-chan# (chan (sliding-buffer 2))]
-     (binding [*context* (context {"resetAfterCommit" (fn [container#]
-                                                        (>!! render-chan# (-> container# deref first)))})
-               gt/*create-element* create-element
-               gt/*convert-props* (fn [props# id-class#]
-                                    (props->value props#))]
-       (assert *context*)
-       ~@body)
-     render-chan#))
+  [host-config & body]
+  `(binding [*context* (context ~host-config)
+             gt/*create-element* create-element
+             gt/*convert-props* (fn [props# id-class#]
+                                  (props->value props#))]
+    (assert *context*)
+    ~@body))
 
-
+(defn render-with-context
+  [component props]
+  (let [render-chan (chan (sliding-buffer 2))]
+    (with-context
+      {"resetAfterCommit" (fn [container] (>!! render-chan (-> container deref first)))}
+      (log/info "=== Rendering ===")
+      (render component props))
+    render-chan))
 
 (defmacro defcomponent
   [compname args & body]
@@ -634,9 +638,7 @@
 
 (defn -main [& args]
   (try
-    (let [render-chan (with-context
-        (log/info "=== Rendering ===")
-        (render TestComponent {}))]
+    (let [render-chan (render-with-context TestComponent {})]
       ; Listen for renders and print them out
       (go-loop []
         (let [container (<! render-chan)]
