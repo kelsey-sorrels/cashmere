@@ -1,42 +1,39 @@
 ![gossamer logo](./resources/logo.png)
 
-A Clojure React-like based on Rodrigo Pombo's Build Your Own React https://pomb.us/build-your-own-react/
+A Clojure wrapper for React. Runs React in GraalJS.
 
 ## Usage
 
 ```clojure
-; component are just functions which take props
-(defn counter
-  [props]
-  (let [[state set-state!] (g/use-state 1)]
-    ; Update the window title when the state changes
-    (g/use-effect (fn [] (set! (.-title js/document) (str "from effect:"
-state))) [state])
-    ; Built in Hiccup support
-    ; Increment state on click
-    [:h1 {:on-click (fn [] (set-state! (fn [c] (inc c))))}
-      (str "Count: " state)]))
+; Component are like functions which take props and context, and return elements
+(require '[gossamer.core-graal :as g]')
 
-; Create dependencies
-; Host config defines how the platform handles node changes
-; Context contains global state
-(let [host-config (g-dom/host-config)
-      context-ref (g/new-context-ref)]
-  ; Start reconciliation-loop
-  (.requestIdleCallback js/window (g/work-loop context-ref host-config))
-  ; Render the counter component into the "app" container
-  (g/render
-    context-ref
-    ; Render the root component using Hiccup syntax
-    [counter]
-    (.getElementById js/document "app")))
+(g/defcomponent Counter
+  [props context]
+  (let [[v set-v!] (g/use-state (get props :start))]
+    (use-effect
+      (fn []
+        (future
+          (doseq [i (range (inc (get props :start)) (get props :end))]
+            ; Increase counter by one for each second that passes
+            (Thread/sleep 1000)
+            (set-v! (inc v)))))
+
+      [])
+    ; Components use Hiccup-syntax
+    [:ul {:key "ul"}
+     [:li {:key "li"} (str v)]]))
+
+; Render Counter and listen for "DOM" updates
+(let [render-chan (g/render-with-context Counter {:start 0 :end 10})]
+  (go-loop []
+    (let [container (<! render-chan)]
+      ; print out DOM updates
+      (println "container" (g/clj-elements container))
+    (recur))))
 ```
 
-## Why not use React?
-
-React is great. Use it. If you just want Clojure, try this.
-
-## Atoms everywhere? Yuck!
+## Wouldn't it be easier to do it another way?
 
 Fork it. Fix it.
 
@@ -58,3 +55,5 @@ Public License, v. 2.0 are satisfied: GNU General Public License as published by
 the Free Software Foundation, either version 2 of the License, or (at your
 option) any later version, with the GNU Classpath Exception which is available
 at https://www.gnu.org/software/classpath/license.html.
+
+Dependencies licensed and redistributed under their original respective licenses.
