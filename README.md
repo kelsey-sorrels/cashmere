@@ -11,7 +11,7 @@ A Clojure wrapper for React. Runs React in GraalJS.
 (g/defcomponent Counter
   [props context]
   (let [[v set-v!] (g/use-state (get props :start))]
-    (use-effect
+    (g/use-effect
       (fn []
         (future
           (doseq [i (range (inc (get props :start)) (get props :end))]
