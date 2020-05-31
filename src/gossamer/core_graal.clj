@@ -80,6 +80,7 @@
     "\n.hasMembers" (.hasMembers v)
     "\n.isProxyObject" (.isProxyObject v))
   (let [dispatch (cond
+                   (nil? v) :nil
                    (.isNull v) :nil
                    (.isHostObject v) :host-object
                    (.isBoolean v) :boolean
@@ -278,8 +279,12 @@
       ;(java.util.ArrayList.
         (mapv clj->value v))))
 
+(def ^:dynamic *create-symbol* nil)
 (defmethod clj->value :keyword [x]
-  (Value/asValue (str ":" (name x))))
+  (log/info "create symbol" *create-symbol*)
+  (if *create-symbol*
+    (*create-symbol* (name x))
+    (Value/asValue (str ":" (name x)))))
 
 (defmethod clj->value :default [x]
   (Value/asValue x))
@@ -354,6 +359,9 @@
       (assert (.canExecute fn-ref) (str "cannot execute " fn-name))
       (.execute fn-ref arg-vals))
     (catch PolyglotException pe
+      (log/error "error executing" fn-name)
+      (when-let [message (.getMessage pe)]
+        (log/error message))
       (log/error (.getPolyglotStackTrace pe)))
     (catch Throwable t
       (log/error t)))))
@@ -515,16 +523,31 @@
              gt/*create-element* create-element
              gt/*convert-props* (fn [props# id-class#]
                                   (props->value props#))]
-    (assert *context*)
-    ~@body))
+     ; Nested binding form because bindings occur in parallel unlike let
+     ; TODO: how to typehint *context* 
+     (binding [*create-symbol* (let [symbol-fn# (-> *context* ^Value (.eval language-id "Symbol"))]
+                                 (fn [s#]
+                                   (log/info "creating symbol" s#)
+                                   (execute symbol-fn# s#)))]
+       (assert *context*)
+       ~@body)))
 
 (defn render-with-context
-  [component props]
+  [component props exec-in-context]
   (let [render-chan (chan (sliding-buffer 2))]
     (with-context
-      {"resetAfterCommit" (fn [container] (>!! render-chan (-> container deref first)))}
+      {"resetAfterCommit" (fn [container]
+        (if-let [root-element (-> container deref first)]
+          (>!! render-chan root-element)
+          (log/warn "root element nil")))}
       (log/info "=== Rendering ===")
-      (render component props))
+      (render component props)
+      (go-loop []
+        (try
+          ((<! exec-in-context))
+          (catch Throwable t
+            (log/error t)))
+        (recur)))
     render-chan))
 
 (defmacro defcomponent
@@ -580,8 +603,20 @@
   (value->clj (execute-fn *context* "React.useContext" c)))
 
 (defn use-reducer
-  [reducer initial-arg init]
-  (value->clj (execute-fn *context* "React.useReducer" reducer initial-arg init)))
+  ([reducer initial-arg]
+    (use-reducer reducer initial-arg identity))
+  ([reducer initial-arg init]
+   {:post [(some? %)
+           (vector? %)
+           (= (count %) 2)]}
+    (letfn [(reducer-fn [state action]
+              (simple-clj->value (reducer state action)))
+            (init-fn [s]
+              (Value/asValue (init s)))]
+      (value->clj (execute-fn *context* "React.useReducer"
+        (clj->value reducer-fn)
+        (simple-clj->value initial-arg)
+        (clj->value init-fn))))))
 
 (defn use-callback
   [f deps]
