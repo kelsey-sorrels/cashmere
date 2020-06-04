@@ -580,7 +580,11 @@
   ([initial-state]
     (use-state initial-state []))
   ([initial-state deps]
-    (value->clj (execute-fn *context* "React.useState" initial-state (clj->value deps)))))
+    (let [[state update-fn] (value->clj (execute-fn *context* "React.useState" initial-state (clj->value deps)))]
+      [state (fn [x]
+               (if (fn? x)
+                 (update-fn (clj->value x))
+                 (update-fn x)))])))
   
 (defn use-effect
   ([f]
