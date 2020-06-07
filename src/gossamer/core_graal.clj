@@ -150,15 +150,21 @@
 
 (defmethod value->clj :props
   [^Value v]
-  #_(log/trace "Got props" v (type v))
-  (merge (value->clj (.getMember v "__props__"))
-         (into {}
-           (for [k (.getMemberKeys v)
-                 :when (not (= k "__props__"))
-                 :let [v (.getMember v k)]]
-             (let [k (get {"children" :children} k k)]
-               #_(log/trace "map value" k v (type v))  
-               [k (value->clj v)])))))
+  #_(log/info "Got props" v (type v))
+  (let [internal-props (value->clj (.getMember v "__props__"))
+        react-props (into {}
+                       (for [k (.getMemberKeys v)
+                             :when (not (= k "__props__"))
+                             :let [prop-v (.getMember v k)]]
+                         (let [k (get {"children" :children} k k)]
+                           #_(log/info "map value" k prop-v (type prop-v))  
+                           [k (value->clj prop-v)])))
+        props (merge internal-props
+                     react-props)]
+    #_(log/info "internal-props" internal-props)
+    #_(log/info "react-props children " (get react-props :children))
+    #_(log/info "Resulting props children " (get props :children))
+    props))
 
 (defn fiber?
   [ks]
@@ -215,8 +221,8 @@
       (toString [this] (str "ProxyExecutable:" x))
       ProxyExecutable
       (execute [_this args]
-        #_(log/trace "===== Executing Clojure Function ====")
-        #_(log/trace "fn" x)
+        #_(log/info "===== Executing Clojure Function ====")
+        #_(log/info "fn" x)
         (let [clj-args (mapv value->clj args)]
           #_(log/trace "clj arg " clj-args)
           (try
@@ -306,15 +312,15 @@
     (if (fn? component)
       (reify ProxyExecutable
         (execute [_this args]
-          #_(log/trace "===== Executing Clojure Component Function ====")
-          #_(log/trace "fn" component)
+          (log/trace "===== Executing Clojure Component Function ====")
+          (log/trace "fn" component)
           (try
             (let [[props context] (mapv value->clj args)
                   ; unwrap gossamer (__props__) and reagent (:argv) nonsense
-                  props (get-in props [:argv 1])
-                  props (merge props
+                  argv-props (get-in props [:argv 1])
+                  props (merge argv-props
                               (dissoc props :argv))]
-              #_(log/trace "props" props)
+              (log/trace "Props" props)
               (component props context))
             (catch PolyglotException pe
               (log/error (.getPolyglotStackTrace pe)))
@@ -491,24 +497,29 @@
         container
         (clj->value (or callback (fn default-callback [& more] (log/trace "default callback" more))))))))
 
+(defn argv->children
+  [argv]
+  #_(log/info "argv" argv (type argv))
+  (if-let [children (drop 2 argv)]
+    children
+    []))
+
 (defn create-element
   [component props & children]
-  #_(log/trace "====== React.createElement ======")
-  #_(log/trace "Type" component)
-  #_(log/trace "Props" props)
-  #_(log/trace "Type props" (type props))
-  #_(log/trace "Children" children)
-  #_(log/trace "Type children" (type children))
+  #_(log/info "====== React.createElement ======")
+  #_(log/info "Type" component)
+  #_(log/info "Props" props)
+  #_(log/info "Type props" (type props))
+  #_(log/info "Children" children)
+  #_(log/info "Type children" (type children))
   (let [children (if children
                    children
-                   (if-let [children (-> props :argv (get 2))]
-                     [children]
-                     []))
-        #_ (log/trace "children" children)
+                   (let [argv (get props :argv)]
+                     (argv->children argv)))
         ^Value element (execute-fn
                    *context*
                    "React.createElement"
-                   (component->value  component)
+                   (component->value component)
                    (props->value props)
                    children)]
     #_(log/trace "element" element)
@@ -532,30 +543,6 @@
        (assert *context*)
        ~@body)))
 
-(defn render-with-context
-  [component props exec-in-context]
-  (let [render-chan (chan (sliding-buffer 2))]
-    (with-context
-      {"resetAfterCommit" (fn [container]
-        (if-let [root-element (-> container deref first)]
-          (>!! render-chan root-element)
-          (log/warn "root element nil")))}
-      (log/info "=== Rendering ===")
-      (render component props)
-      (go-loop []
-        (try
-          ((<! exec-in-context))
-          (catch Throwable t
-            (log/error t)))
-        (recur)))
-    render-chan))
-
-(defmacro defcomponent
-  [compname args & body]
-  `(defn ~compname ~args
-     (let [v# (do ~@body)]
-       (gt/as-element v#))))
-
 (defn clj-element
   [element]
   (if (map? element)
@@ -574,6 +561,32 @@
       [t (dissoc props :children) (mapv clj-elements (if children @children []))])
     element))
 
+
+(defn render-with-context
+  [component props exec-in-context]
+  (let [render-chan (chan (sliding-buffer 2))]
+    (with-context
+      {"resetAfterCommit" (fn [container]
+        (if-let [root-element (-> container deref first)]
+          (do
+            (log/info "Rendered" (clj-elements root-element))
+          (>!! render-chan root-element))
+          (log/warn "root element nil")))}
+      (log/info "=== Rendering ===")
+      (render component props)
+      (go-loop []
+        (try
+          ((<! exec-in-context))
+          (catch Throwable t
+            (log/error t)))
+        (recur)))
+    render-chan))
+
+(defmacro defcomponent
+  [compname args & body]
+  `(defn ~compname ~args
+     (let [v# (do ~@body)]
+       (gt/as-element v#))))
 
 ;; Hooks API
 (defn use-state
@@ -654,30 +667,18 @@
 (defcomponent TestComponent
   [props context]
   (log/trace "TestComponent" props context (thread-name))
-  (let [[s set-s!] (use-state 0)]
-    (use-effect
-      (fn []
-        (log/trace "in effect s:" s "once:" @once (thread-name))
-        (future
-          (log/trace "in future" (thread-name))
-          (if-not @once
-            (do
-              (log/trace "setting s")
-              (set-s! (inc s))
-              (reset! once true))
-            (do
-              ; should never get here
-              (log/error "ERROR: this should never be called")
-              (assert false)))))
-      
-      [])
-  (log/info "TestComponent end" props context s (thread-name))
-    [:ul {:key "ul"}
-     [:li {:key "li"} (str s)]]))
+  [:ul {:key "ul"}
+   (get props :children)])
+
+(defcomponent RootComponent
+  [props _]
+  [TestComponent {}
+    [:li {:key "1"} 1]
+    [:li {:key "2"} 2]])
 
 (defn -main [& args]
   (try
-    (let [render-chan (render-with-context TestComponent {})]
+    (let [render-chan (render-with-context RootComponent {} (chan (sliding-buffer 1)))]
       ; Listen for renders and print them out
       (go-loop []
         (let [container (<! render-chan)]
