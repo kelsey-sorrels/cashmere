@@ -569,8 +569,8 @@
       {"resetAfterCommit" (fn [container]
         (if-let [root-element (-> container deref first)]
           (do
-            (log/info "Rendered" (clj-elements root-element))
-          (>!! render-chan root-element))
+            #_(log/info "Rendered" (clj-elements root-element))
+            (>!! render-chan root-element))
           (log/warn "root element nil")))}
       (log/info "=== Rendering ===")
       (render component props)
