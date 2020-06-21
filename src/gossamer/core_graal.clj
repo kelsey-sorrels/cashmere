@@ -71,7 +71,7 @@
 ;  Returns a Clojure (or Java) value for given polyglot Value if possible,
 ;     otherwise throws.
 (defmulti value->clj (fn [^Value v]
-  #_(log/trace "v" v (type v)
+  #_(log/info "value->clj" v (type v)
     "\n.isHostObject" (.isHostObject v)
     "\n.canExecute" (.canExecute v)
     "\n.canInstantiate" (.canInstantiate v)
@@ -175,7 +175,7 @@
   #_(log/trace "Got object" v (type v))
   #_(log/info "Got object ks" (.getMemberKeys v))
   (let [ks (.getMemberKeys v)
-        ks (if (and true (fiber? ks))
+        ks (if (fiber? ks)
              #{"elementType" "type"}
              ks)]
     (into {}
@@ -302,31 +302,54 @@
     props
     (Value/asValue
       (ProxyObject/fromMap
-        (hash-map "__props__" (Value/asValue props)
-                  "key" (get props :key))))))
+        (apply hash-map
+          "__props__" (Value/asValue props)
+          "key" (get props :key)
+          (if (contains? props :ref)
+            (let [original (-> props :ref meta :original)]
+              ["ref" original])
+            []))))))
 
 (defn component->value
   [component]
   #_(log/trace "component->value" component)
-  (Value/asValue 
-    (if (fn? component)
-      (reify ProxyExecutable
-        (execute [_this args]
-          (log/trace "===== Executing Clojure Component Function ====")
-          (log/trace "fn" component)
-          (try
-            (let [[props context] (mapv value->clj args)
-                  ; unwrap gossamer (__props__) and reagent (:argv) nonsense
-                  argv-props (get-in props [:argv 1])
-                  props (merge argv-props
-                              (dissoc props :argv))]
-              (log/trace "Props" props)
-              (component props context))
-            (catch PolyglotException pe
-              (log/error (.getPolyglotStackTrace pe)))
-            (catch Throwable t
-              (log/error t)))))
-      (str component))))
+  (let [m {"displayName" (or (some-> component meta :display-name str) "Unknown")}]
+    (Value/asValue 
+      (if (fn? component)
+        (reify
+          ProxyExecutable
+          (execute [_this args]
+            (log/trace "===== Executing Clojure Component Function ====")
+            (log/trace "fn" component)
+            (try
+              (let [[props context] (mapv value->clj args)
+                    ; unwrap gossamer (__props__) and reagent (:argv) nonsense
+                    argv-props (get-in props [:argv 1])
+                    props (merge argv-props
+                                (dissoc props :argv))]
+                (log/trace "Props" props)
+                (component props context))
+              (catch PolyglotException pe
+                (log/error (.getPolyglotStackTrace pe)))
+              (catch Throwable t
+                (log/error t))))
+          ProxyObject
+          ; Object  getMember(String key)
+          ; Returns the value of the member.
+          (getMember [_this k] (clj->value (get m k)))
+          ; Object  getMemberKeys()
+          ; Returns array of member keys.
+          (getMemberKeys [_this] (into-array String (map str (keys m))))
+          ; boolean   hasMember(String key)
+          ; Returns true if the proxy object contains a member with the given key, or else false.
+          (hasMember [_this k] (contains? m k))
+          ; void  putMember(String key, Value value)
+          ; Sets the value associated with a member.
+          (putMember [_this k v])
+          ; default boolean   removeMember(String key)
+          ; Removes a member key and its value.
+          (removeMember [_this k]))
+        (str component)))))
 
 (def ^Context$Builder context-builder
   (let [builder (doto (Context/newBuilder (into-array String [language-id]))
@@ -356,11 +379,16 @@
     (clj->value x)
     (Value/asValue x)))
 
+(def ^:private exec-cache (atom {}))
 (defn execute-fn [^Context context fn-name & args]
   ;; Javascript execution is single-threaded. Restrict concurrent access to evaluation
   (locking ctx-lock
     (try
-    (let [fn-ref (.eval context language-id fn-name)
+    (let [fn-ref (if-let [fn-ref (-> exec-cache deref (get fn-name))]
+                   fn-ref
+                   (let [fn-ref (.eval context language-id fn-name)]
+                     (swap! exec-cache assoc fn-name fn-ref)
+                     fn-ref))
           arg-vals (into-array Object args)]
       (assert (.canExecute fn-ref) (str "cannot execute " fn-name))
       (.execute fn-ref arg-vals))
@@ -385,7 +413,8 @@
           (number? element-type)))
     "createInstance" (fn createInstance [type props root-container-instance host-context internal-instance-handle]
       #_(log/trace "createInstance" type props)
-      [(keyword type) props (atom [])])
+      ; type, props, children, host-dom
+      [(keyword type) props (atom []) (atom nil)])
     "createTextInstance" (fn createTextInstance [new-text root-container-instance host-context work-in-progress] new-text)
     "supportsPersistence" true
     ;; Persistence API
@@ -420,7 +449,8 @@
        newProps
        (if childrenUnchanged
          (nth currentInstance 2)
-         (atom []))])})
+         (atom []))
+       (nth currentInstance 3)])})
 
 (defn context
   ([]
@@ -557,46 +587,50 @@
   [element]
   #_(log/trace "element" element)
   (if (vector? element)
-    (let [[t props children] element]
-      [t (dissoc props :children) (mapv clj-elements (if children @children []))])
+    (let [[t props children host-dom] element]
+      [t
+       (dissoc props :children)
+       (mapv clj-elements (if children @children []))
+       host-dom])
     element))
 
 
 (defn render-with-context
-  [component props exec-in-context]
-  (let [render-chan (chan (sliding-buffer 2))]
-    (with-context
-      {"resetAfterCommit" (fn [container]
-        (if-let [root-element (-> container deref first)]
-          (do
-            #_(log/info "Rendered" (clj-elements root-element))
-            (>!! render-chan root-element))
-          (log/warn "root element nil")))}
-      (log/info "=== Rendering ===")
-      (render component props)
-      (go-loop []
-        (try
-          ((<! exec-in-context))
-          (catch Throwable t
-            (log/error t)))
-        (recur)))
-    render-chan))
+  "Returns a function f which when invoked with f & args invokes (apply f args)
+  with the bindings present."
+  [component props on-render]
+  (with-context
+    {"resetAfterCommit" (fn [container]
+      (if-let [root-element (-> container deref first)]
+        (do
+          #_(log/info "Rendered" (clj-elements root-element))
+          (on-render root-element))
+        (log/warn "root element nil")))}
+    (log/info "=== Rendering ===")
+    (render component props)
+    (bound-fn* (fn [f & args] (apply f args)))))
 
 (defmacro defcomponent
   [compname args & body]
-  `(defn ~compname ~args
+  `(def ~compname (with-meta (fn ~compname  ~args
      (let [v# (do ~@body)]
-       (gt/as-element v#))))
+       (gt/as-element v#))) {:display-name (str ~compname)})))
 
 ;; Hooks API
 (defn use-state
   ([initial-state]
     (use-state initial-state []))
   ([initial-state deps]
-    (let [[state update-fn] (value->clj (execute-fn *context* "React.useState" initial-state (clj->value deps)))]
+    (let [[state update-fn] (value->clj (execute-fn *context* "React.useState"
+      (simple-clj->value initial-state)
+      (clj->value deps)))]
       [state (fn [x]
                (if (fn? x)
-                 (update-fn (clj->value x))
+                 (update-fn (clj->value (fn [v]
+                                          (try
+                                            (x v)
+                                            (catch Throwable t
+                                              (log/error t))))))
                  (update-fn x)))])))
   
 (defn use-effect
@@ -645,21 +679,33 @@
 
 (defn use-ref
   [initial-value]
-  (value->clj (execute-fn *context* "React.useRef" initial-value)))
+  (let [r (execute-fn *context* "React.useRef" (simple-clj->value initial-value))]
+    (with-meta (value->clj r) {:original r})))
 
 (defn use-imperative-handle
   [ref createHandle deps]
   (value->clj (execute-fn *context* "React.useImperativeHandle" ref createHandle deps)))
 
-(defn use-layout-effect [f]
-  (value->clj (execute-fn *context* "React.useLayoutEffect" f)))
+(defn use-layout-effect
+  ([f]
+    (use-layout-effect f nil))
+  ([f deps]
+    ; wrap f so that it already returns a cleaup function
+    ; either one supplied by f for a no-op fn
+    #_(log/info "use-effect deps" (type deps) deps (type (clj->value deps)) (clj->value deps))
+    (letfn [(effect-fn []
+              (let [result (f)]
+                (clj->value
+                  (if (fn? result)
+                    result
+                    ; Rreturn an empty destroy function if response is not a function
+                    (fn use-effect-default-destroy [] nil)))))]
+      (value->clj (execute-fn *context* "React.useLayoutEffect" (clj->value effect-fn) (clj->value deps))))))
 
 (defn use-debug-value [v]
   (value->clj (execute-fn *context* "React.useDebugValue" v)))
 
 ;; Demo Section
-(def once (atom false))
-
 (defn thread-name
   []
   (.getName (Thread/currentThread)))
