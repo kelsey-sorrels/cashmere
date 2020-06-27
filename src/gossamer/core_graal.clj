@@ -2,6 +2,7 @@
   (:require [gossamer.template :as gt]
             [criterium.core :as cc]
             [taoensso.timbre :as log]
+            [clojure.data]
             [clojure.inspector]
             [clojure.java.io]
             [clojure.core.async :refer [chan go go-loop sliding-buffer <!! <! >! >!!]])
@@ -400,6 +401,42 @@
     (catch Throwable t
       (log/error t)))))
 
+(def reflow-css-keys
+  #{:top
+    :bottom
+    :left
+    :right
+    :align-content
+    :align-items
+    :align-self
+    :display
+    :position
+    :width
+    :height
+    :min-width
+    :min-height
+    :max-width
+    :max-height
+    :margin
+    :margin-left
+    :margin-right
+    :margin-top
+    :margin-bottom
+    :padding
+    :padding-left
+    :padding-right
+    :padding-top
+    :padding-bottom})
+
+(defn style-change-requires-layout?
+  [old-props new-props]
+  (let [old-props-reflow-keys (-> old-props (get :style) (select-keys reflow-css-keys))
+        new-props-reflow-keys (-> new-props (get :style) (select-keys reflow-css-keys))]
+    (when (not= old-props-reflow-keys
+                new-props-reflow-keys)
+      (log/info (vec (take 2 (clojure.data/diff old-props-reflow-keys new-props-reflow-keys))))
+      true)))
+
 ;; Roughly taken from https://github.com/facebook/react/blob/235a6c4af67e3e1fbfab7088c857265e0c95b81f/packages/react-noop-renderer/src/createReactNoop.js
 (def default-host-config
   {
@@ -413,8 +450,8 @@
           (number? element-type)))
     "createInstance" (fn createInstance [type props root-container-instance host-context internal-instance-handle]
       #_(log/trace "createInstance" type props)
-      ; type, props, children, host-dom
-      [(keyword type) props (atom []) (atom nil)])
+      ; type, props, children, host-dom, dirty
+      [(keyword type) props (atom []) (atom nil) true])
     "createTextInstance" (fn createTextInstance [new-text root-container-instance host-context work-in-progress] new-text)
     "supportsPersistence" true
     ;; Persistence API
@@ -450,7 +487,12 @@
        (if childrenUnchanged
          (nth currentInstance 2)
          (atom []))
-       (nth currentInstance 3)])})
+       (nth currentInstance 3)
+       (or (style-change-requires-layout? oldProps newProps)
+           (if childrenUnchanged
+             false
+             (not= (count (get oldProps :children))
+                   (count (get newProps :children)))))])})
 
 (defn context
   ([]
@@ -587,11 +629,12 @@
   [element]
   #_(log/trace "element" element)
   (if (vector? element)
-    (let [[t props children host-dom] element]
+    (let [[t props children host-dom requires-layout] element]
       [t
        (dissoc props :children)
        (mapv clj-elements (if children @children []))
-       host-dom])
+       host-dom
+       requires-layout])
     element))
 
 

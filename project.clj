@@ -1,4 +1,4 @@
-(defproject gossamer "0.1.0-SNAPSHOT"
+(defproject gossamer "0.1.0"
   :description "BYOR - Build Your Own React Using Clojure"
   :url "https://github.com/aaron-santos/gossamer"
   :license {:name "EPL-2.0 OR GPL-2.0-or-later WITH Classpath-exception-2.0"
@@ -15,7 +15,6 @@
 
   :source-paths ["src"]
 
-  :java-cmd "/home/santos/Downloads/graalvm-ce-java11-20.1.0/bin/java"
   :jvm-opts ["-Xdebug"
              "-XX:+UnlockExperimentalVMOptions"
              "-XX:+EnableJVMCI"
@@ -25,8 +24,7 @@
              #_"-Dgraal.TraceTruffleCompilation=true"
              #_"-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=1044"]
 
-  :resource-paths ["src/node_modules"
-                   "/home/santos/Downloads/graalvm-ce-java11-20.1.0/tools/chromeinspector/chromeinspector.jar"]
+  :resource-paths ["src/node_modules"]
 
   :cljsbuild {:builds
               [{:id "dev"
