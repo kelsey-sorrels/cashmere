@@ -1,4 +1,4 @@
-(ns gossamer.fiber
+(ns cashmere.fiber
   (:require [clojure.pprint]))
 
 (defrecord Fiber [type props dom parent-ref child-ref sibling-ref alternate-ref effectTag])

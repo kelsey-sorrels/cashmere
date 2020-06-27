@@ -1,6 +1,6 @@
-(ns gossamer.core2
-  (:require [gossamer.host-config :as ghc]
-            [gossamer.template :as gt]
+(ns cashmere.core2
+  (:require [cashmere.host-config :as ghc]
+            [cashmere.template :as gt]
             [clojure.string]
             #?(:clj [clojure.core.async :as async :refer [<! >! <!! >!! timeout chan alt! go go-loop]]
                :cljs [clojure.core.async :as async :refer [<! >! timeout chan alt! go go-loop]])

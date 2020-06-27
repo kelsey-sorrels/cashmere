@@ -1,4 +1,4 @@
-(ns gossamer.element
+(ns cashmere.element
   (:require [taoensso.timbre :as log]))
 
 (defrecord Element [type props])

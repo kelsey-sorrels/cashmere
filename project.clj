@@ -1,6 +1,6 @@
-(defproject gossamer "0.1.0"
+(defproject cashmere "0.1.0"
   :description "BYOR - Build Your Own React Using Clojure"
-  :url "https://github.com/aaron-santos/gossamer"
+  :url "https://github.com/aaron-santos/cashmere"
   :license {:name "EPL-2.0 OR GPL-2.0-or-later WITH Classpath-exception-2.0"
             :url "https://www.eclipse.org/legal/epl-2.0/"}
   :dependencies [[org.clojure/clojure "1.10.1"]
@@ -9,7 +9,7 @@
                  [org.graalvm.js/js "20.1.0"]
                  [criterium "0.4.5"]
                  [com.taoensso/timbre "4.10.0"]]
-  :repl-options {:init-ns gossamer.core}
+  :repl-options {:init-ns cashmere.core}
   :plugins [[lein-figwheel "0.5.19"]
             [lein-cljsbuild "1.1.7" :exclusions [[org.clojure/clojure]]]]
 
@@ -33,16 +33,16 @@
                 ;; The presence of a :figwheel configuration here
                 ;; will cause figwheel to inject the figwheel client
                 ;; into your build
-                :figwheel {;:on-jsload "gossamer.corejs/on-js-reload"
+                :figwheel {;:on-jsload "cashmere.corejs/on-js-reload"
                            ;; :open-urls will pop open your application
                            ;; in the default browser once Figwheel has
                            ;; started and compiled your application.
                            ;; Comment this out once it no longer serves you.
                            :open-urls ["http://localhost:3449/index.html"]}
 
-                :compiler {:main gossamer.corejs
+                :compiler {:main cashmere.corejs
                            :asset-path "js/compiled/out"
-                           :output-to "resources/public/js/compiled/gossamer.js"
+                           :output-to "resources/public/js/compiled/cashmere.js"
                            :output-dir "resources/public/js/compiled/out"
                            :source-map-timestamp true
                            ;; To console.log CLJS data-structures make sure you enable devtools in Chrome
@@ -53,8 +53,8 @@
                ;; lein cljsbuild once min
                {:id "min"
                 :source-paths ["src"]
-                :compiler {:output-to "resources/public/js/compiled/gossamer.js"
-                           :main gossamer.corejs
+                :compiler {:output-to "resources/public/js/compiled/cashmere.js"
+                           :main cashmere.corejs
                            :optimizations :advanced
                            :pretty-print false}}]}
 

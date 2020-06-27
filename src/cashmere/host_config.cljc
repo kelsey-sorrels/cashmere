@@ -1,4 +1,4 @@
-(ns gossamer.host-config)
+(ns cashmere.host-config)
 
 (defprotocol HostConfig
   (get-public-instance [this])

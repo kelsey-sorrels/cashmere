@@ -1,9 +1,9 @@
-(ns gossamer.core-test
+(ns cashmere.core-test
   (:require [clojure.test :refer :all]
             clojure.pprint
             [clojure.core.async :as async :refer [<!!]]
             [taoensso.timbre :as log]
-            [gossamer.core :refer :all]))
+            [cashmere.core :refer :all]))
 
 (deftest create-element-test
   (testing "create-element with no children"

@@ -1,4 +1,4 @@
-![gossamer logo](./resources/logo.png)
+![cashmere logo](./resources/logo.png)
 
 A Clojure wrapper for React. Runs React in GraalJS.
 
@@ -6,7 +6,7 @@ A Clojure wrapper for React. Runs React in GraalJS.
 
 ```clojure
 ; Component are like functions which take props and context, and return elements
-(require '[gossamer.core-graal :as g]')
+(require '[cashmere.core-graal :as g]')
 
 (g/defcomponent Counter
   [props context]

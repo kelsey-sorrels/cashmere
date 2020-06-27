@@ -1,8 +1,8 @@
-(ns gossamer.begin-work
-  (:require [gossamer.context :as gc]
-            [gossamer.fiber :as gf]
-            [gossamer.host-config :as ghc]
-            [gossamer.template :as gt]
+(ns cashmere.begin-work
+  (:require [cashmere.context :as gc]
+            [cashmere.fiber :as gf]
+            [cashmere.host-config :as ghc]
+            [cashmere.template :as gt]
             [clojure.pprint]
             [taoensso.timbre :as log]))
 

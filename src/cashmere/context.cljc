@@ -1,4 +1,4 @@
-(ns gossamer.context)
+(ns cashmere.context)
 
 (def ^:dynamic *context-ref* nil)
 

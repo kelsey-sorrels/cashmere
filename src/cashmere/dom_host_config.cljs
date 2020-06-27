@@ -1,7 +1,7 @@
-(ns gossamer.dom-host-config
-  (:require [gossamer.core :as g]
-            [gossamer.element :as ge]
-            [gossamer.host-config :as ghc]
+(ns cashmere.dom-host-config
+  (:require [cashmere.core :as g]
+            [cashmere.element :as ge]
+            [cashmere.host-config :as ghc]
             [taoensso.timbre :as log]))
 
 (defn update-dom

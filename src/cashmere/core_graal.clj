@@ -1,5 +1,5 @@
-(ns gossamer.core-graal
-  (:require [gossamer.template :as gt]
+(ns cashmere.core-graal
+  (:require [cashmere.template :as gt]
             [criterium.core :as cc]
             [taoensso.timbre :as log]
             [clojure.data]
@@ -324,7 +324,7 @@
             (log/trace "fn" component)
             (try
               (let [[props context] (mapv value->clj args)
-                    ; unwrap gossamer (__props__) and reagent (:argv) nonsense
+                    ; unwrap cashmere (__props__) and reagent (:argv) nonsense
                     argv-props (get-in props [:argv 1])
                     props (merge argv-props
                                 (dissoc props :argv))]

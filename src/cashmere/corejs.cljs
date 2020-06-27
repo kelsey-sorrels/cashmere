@@ -1,13 +1,13 @@
-(ns gossamer.corejs
-  (:require [gossamer.core :as g]
-            [gossamer.context :as gc]
-            [gossamer.element :as ge]
-            [gossamer.dom-host-config :as g-dom]
+(ns cashmere.corejs
+  (:require [cashmere.core :as g]
+            [cashmere.context :as gc]
+            [cashmere.element :as ge]
+            [cashmere.dom-host-config :as g-dom]
             [taoensso.timbre :as log]))
 
 (enable-console-print!)
 
-(println "This text is printed from src/gossamer/core.cljs. Go ahead and edit it and see reloading in action.")
+(println "This text is printed from src/cashmere/core.cljs. Go ahead and edit it and see reloading in action.")
 
 (defn counter
   [props]

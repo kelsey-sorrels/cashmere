@@ -1,4 +1,4 @@
-(ns gossamer.template
+(ns cashmere.template
   (:require [clojure.string]
             [clojure.walk :refer [prewalk]]
             [clojure.core.cache :as cache]

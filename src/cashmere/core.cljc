@@ -1,9 +1,9 @@
-(ns gossamer.core
-  (:require [gossamer.context :as gc]
-            [gossamer.fiber :as gf]
-            [gossamer.host-config :as ghc]
-            [gossamer.template :as gt]
-            [gossamer.begin-work :as gbw]
+(ns cashmere.core
+  (:require [cashmere.context :as gc]
+            [cashmere.fiber :as gf]
+            [cashmere.host-config :as ghc]
+            [cashmere.template :as gt]
+            [cashmere.begin-work :as gbw]
             [clojure.string]
             #?(:clj [clojure.core.async :as async :refer [<! >! <!! >!! timeout chan alt! go go-loop]]
                :cljs [clojure.core.async :as async :refer [<! >! timeout chan alt! go go-loop]])
