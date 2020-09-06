@@ -58,7 +58,7 @@
 (defn meta-required?
   [^Value v]
   (when-let [mo (.getMetaObject v)]
-    #_(log/trace "mo" mo)
+    #_(log/info "mo" mo (type mo))
     (when (.hasMembers mo)
       #_(log/trace "mo has members" (.getMemberKeys mo))
       (when (.hasMember mo "type")
@@ -69,17 +69,24 @@
             #_(log/trace (= "symbol" type-string))
             (contains? #{"symbol"} type-string)))))))
 
+(defn symbol-value?
+  [^Value v]
+  (when-let [mo (.getMetaObject v)]
+    (when-let[mtn (.getMetaQualifiedName mo)]
+      (= mtn "symbol"))))
+
 ;  Returns a Clojure (or Java) value for given polyglot Value if possible,
 ;     otherwise throws.
 (defmulti value->clj (fn [^Value v]
   #_(log/info "value->clj" v (type v)
-    "\n.isHostObject" (.isHostObject v)
-    "\n.canExecute" (.canExecute v)
-    "\n.canInstantiate" (.canInstantiate v)
-    ;"\nmeta-required?" (meta-required? v)
-    "\n.hasArrayElement" (.hasArrayElements v)
+  "\n.isHostObject" (.isHostObject v)
+  "\n.canExecute" (.canExecute v)
+  "\n.canInstantiate" (.canInstantiate v)
+  ;"\nmeta-required?" (meta-required? v)
+  "\n.hasArrayElement" (.hasArrayElements v)
     "\n.hasMembers" (.hasMembers v)
-    "\n.isProxyObject" (.isProxyObject v))
+    "\n.isProxyObject" (.isProxyObject v)
+    "\n.isMetaObject" (.isMetaObject v))
   (let [dispatch (cond
                    (nil? v) :nil
                    (.isNull v) :nil
@@ -95,13 +102,16 @@
                    (.isNativePointer v) (assert false "isNativePointer")
                    (.isDate v) (assert false "isDate")
                    (.isTime v) (assert false "isTime")
+                   (symbol-value? v) :symbol
                    (meta-required? v) :meta
                    (.hasArrayElements v) :array
                    (.hasMembers v) (if (.hasMember v "__props__") :props :object)
                    (.isProxyObject v) :proxy
                    :else (do
-                           (print-table (:members (r/reflect v)))
-                           (throw (Exception. (str "Unsupported value " v " " (type v) " " (.getMetaObject v) " " (type (.getMetaObject v)))))))]
+                           #_(print-table (:members (r/reflect v)))
+                           (throw (Exception. (str "Unsupported value v:" v " type:" (class v) " mo:" (.getMetaObject v) " mo-type:" (class (.getMetaObject v)))))
+                           #_(log/error "Unsupported value v:" v " type:" (class v) " mo:" (.getMetaObject v) " mo-type:" (class (.getMetaObject v)))
+                           #_:string))]
     #_(log/trace "dispatching to" dispatch)
     dispatch)))
 
@@ -133,10 +143,14 @@
   [^Value v]
   (reify-ifn v))
 
+(defmethod value->clj :symbol
+  [^Value v]
+  (keyword (str v)))
+
 (defmethod value->clj :meta
   [^Value v]
   (let [mo (.getMetaObject v)]
-    #_(log/trace "mo" mo)
+    (log/info "value->clj mo" mo)
     #_(when (.hasMembers v)
       (doseq [k (.getMemberKeys v)]
         (log/trace k (.getMember v k))))
@@ -207,6 +221,8 @@
   (cond
     (nil? x) :nil
     (fn? x) :fn
+    ; records should be host objects
+    (record? x) :default
     (map? x) :map
     (seq? x) :seq
     (set? x) :seq
@@ -229,9 +245,11 @@
           (try
             (clj->value (apply x clj-args))
             (catch PolyglotException pe
-              (log/error (.getPolyglotStackTrace pe)))
+              (log/error (.getPolyglotStackTrace pe))
+              (throw pe))
             (catch Throwable t
-              (log/error t))))))))
+              (log/error t)
+              (throw t))))))))
 
 (defn clj-map->value
   [m]
@@ -401,7 +419,9 @@
     (catch Throwable t
       (log/error t)))))
 
+
 (def reflow-css-keys
+  ; From https://csstriggers.com/
   #{:top
     :bottom
     :left
@@ -426,16 +446,157 @@
     :padding-left
     :padding-right
     :padding-top
-    :padding-bottom})
+    :padding-bottom
+    ; Custom
+    ; TODO: Find some documentation describing if css content changes do or do not trigger reflow
+    :content
+    })
+
+(defrecord Instance [element-type props children host-dom layout-required last-children style-map]
+  Object
+  (toString [this]
+    (select-keys this [:element-type :props :children])))
+
+(defn new-instance
+  ([element-type props]
+    (new-instance element-type props []))
+  ([element-type props children]
+    (->Instance
+      element-type
+      props
+      (atom children)
+      (atom nil)
+      :new-instance
+      nil
+      nil)))
+
+(defn spaces-same?
+  [s1 s2]
+  (= (->> s1
+       (re-seq #"\\s")
+       (map count))
+     (->> s1
+       (re-seq #"\\s")
+       (map count))))
+
+(defn text-instance-layout-required
+  [last-text new-text]
+  (cond
+    ; no change in text
+    (= last-text new-text)
+      :text-same
+    ; same length and spaces same?
+    (and
+      (= (count last-text)
+         (count new-text))
+      (spaces-same? last-text new-text))
+      :text-updated
+    ; diff length or diff spaces
+    :else
+      :text-changed))
+
+(defn new-text-instance
+  ([props text]
+    (new-text-instance props text nil))
+  ([props text old-text]
+    #_(log/info "new-text-instance old-text:" old-text)
+    (->Instance
+      :raw-text
+      props
+      (atom [text])
+      (atom nil)
+      (if old-text
+        (text-instance-layout-required old-text text)
+        :new-text-instance)
+      false
+      nil)))
+
+(defn clone-instance
+  [instance new-props new-children layout-required]
+  (assoc instance
+    :props new-props
+    :children new-children
+    :layout-required layout-required
+    :last-children (when (= layout-required :children-changed)
+                     (let [last-children (-> instance :children deref)]
+                       (assert (vector? last-children))
+                       last-children))))
+
+(defn conj-child!
+  [instance child]
+  #_(log/info "conj-child!" (:element-type instance) (:element-type child) "last-children" (some-> instance :last-children count))
+  (let [child-instance
+         (if-let [last-children (:last-children instance)]
+           (let [last-index (-> instance :children deref count)]
+             #_(log/info "last-index" last-index "last-children count" (count last-children))
+             (if (< last-index (count last-children))
+               (let [last-child (nth last-children last-index)]
+                 #_(log/info "conj-child checking last-child" (:element-type last-child) (get-in last-child [:props :key]))
+                 #_(log/info "conj-child checking new-child" (:element-type child) (get-in child [:props :key]))
+                 (cond
+                   (= :raw-text
+                      (:element-type child)
+                      (:element-type last-child))
+                     (let [last-text (-> last-child :children deref first)
+                           new-text (-> child :children deref first)
+                           layout-required (text-instance-layout-required last-text new-text)]
+                       #_(log/info "last-text" last-text)
+                       #_(log/info "new-text" new-text)
+                       #_(log/info "layout-required" layout-required)
+                       (assoc child :layout-required layout-required))
+                   (not= child last-child)
+                     (assoc child :layout-required :new-child)
+                   :else
+                     child))
+               child))
+           child)]
+    (swap! (:children instance) conj child-instance)))
+
+(defn reset-children!
+  [instance new-children]
+  (reset! (:children instance) new-children)
+  instance)
+
+(defn swap-children!
+  [instance f & more]
+  (apply swap! (:children instance) f more)
+  instance)
+
+(defn pre-walk-instances
+  [f e]
+  (if (instance? Instance e)
+    (-> e
+      f
+      (update :children
+        (fn [children-atom]
+          (let [children (vec @children-atom)
+                new-children (mapv (partial pre-walk-instances f)
+                   children)]
+            (atom
+              new-children)))))
+    e))
+  
+(defn post-walk-instances
+  [f e]
+  (if (instance? Instance e)
+    (-> e
+      (update :children
+        (fn [children-atom]
+          (atom
+            (mapv (partial post-walk-instances f)
+                 @children-atom))))
+      f)
+    e))
 
 (defn style-change-requires-layout?
   [old-props new-props]
-  (let [old-props-reflow-keys (-> old-props (get :style) (select-keys reflow-css-keys))
-        new-props-reflow-keys (-> new-props (get :style) (select-keys reflow-css-keys))]
-    (when (not= old-props-reflow-keys
-                new-props-reflow-keys)
-      (log/info (vec (take 2 (clojure.data/diff old-props-reflow-keys new-props-reflow-keys))))
-      true)))
+  (let [old-style-reflow (-> old-props (get :style) (select-keys reflow-css-keys))
+        new-style-reflow (-> new-props (get :style) (select-keys reflow-css-keys))]
+    (when (not= old-style-reflow
+                new-style-reflow)
+      (log/info "style-change requires layout" (vec (take 2 (clojure.data/diff old-style-reflow new-style-reflow))))
+      (vec (take 2 (clojure.data/diff old-style-reflow new-style-reflow)))
+      #_true)))
 
 ;; Roughly taken from https://github.com/facebook/react/blob/235a6c4af67e3e1fbfab7088c857265e0c95b81f/packages/react-noop-renderer/src/createReactNoop.js
 (def default-host-config
@@ -449,16 +610,30 @@
       (or (string? element-type)
           (number? element-type)))
     "createInstance" (fn createInstance [type props root-container-instance host-context internal-instance-handle]
-      #_(log/trace "createInstance" type props)
-      ; type, props, children, host-dom, dirty
-      [(keyword type) props (atom []) (atom nil) true])
-    "createTextInstance" (fn createTextInstance [new-text root-container-instance host-context work-in-progress] new-text)
+      (log/info "createInstance" type props)
+      ; type, props, children, host-dom, rquires-layout
+      (new-instance (keyword type) props))
+    "createTextInstance" (fn createTextInstance [new-text root-container-instance host-context work-in-progress]
+      ; TODO: cleanup
+      (new-text-instance {} new-text))
     "supportsPersistence" true
     ;; Persistence API
     "appendInitialChild" (fn appendInitialChild [parent child]
       #_(log/trace "appendInitialChild" parent child)
-      (-> parent (nth 2) (swap! conj child)))
-    "finalizeInitialChildren" (fn finalizeInitialChildren [instance type new-props root-container-instance current-host-context] false)
+      (let [children-atom  (:children parent)]
+        #_(log/info "appendInitialChild parent-layout-required:"
+          (:layout-required parent)
+          (type children-atom)
+          (-> children-atom deref count))
+        (when-not children-atom
+          (log/info "children atom nil")
+          (log/info "parent" parent)
+          (log/info "child" child))
+        ; TODO: why would parent or child be nil?
+        (conj-child! parent child)))
+    "finalizeInitialChildren" (fn finalizeInitialChildren [instance type new-props root-container-instance current-host-context]
+      
+      false)
     "createContainerChildSet" (fn createContainerChildSet [container]
       #_(log/trace "createContainerChildSet" container)
       (atom []))
@@ -467,7 +642,7 @@
       (swap! parent conj child))
     "finalizeContainerChildren" (fn finalizeContainerChildren [container new-child-set]
                                   #_(log/trace "finalizeContainerChildren" @container @new-child-set)
-                                  (swap! container concat @new-child-set))
+                                  (reset! container @new-child-set))
     "replaceContainerChildren" (fn replaceContainerChildren [container new-children]
        #_(log/trace "replaceContainerChildren" (vec @container) @new-children)
        (reset! container @new-children))
@@ -479,20 +654,26 @@
     "prepareUpdate" (fn prepareUpdate [instance type oldProps newProps rootContainerInstance currentHostContext]
       #_(log/trace "prepareUpdate" args)
       {})
-    "cloneInstance" (fn cloneInstance [currentInstance updatePayload type oldProps newProps workInProgress childrenUnchanged recyclableInstance]
+    "cloneInstance" (fn cloneInstance [current-instance updatePayload type oldProps newProps workInProgress childrenUnchanged recyclableInstance]
       ; From https://codeclimate.com/github/facebook/react/packages/react-noop-renderer/src/createReactNoop.js/source
-      #_(log/info "cloneInstance"  type @(nth currentInstance 2) oldProps newProps childrenUnchanged)
-      [(keyword type)
-       newProps
-       (if childrenUnchanged
-         (nth currentInstance 2)
-         (atom []))
-       (nth currentInstance 3)
-       (or (style-change-requires-layout? oldProps newProps)
-           (if childrenUnchanged
-             false
-             (not= (count (get oldProps :children))
-                   (count (get newProps :children)))))])})
+      #_(log/info "cloneInstance"  type @(:children current-instance) oldProps newProps childrenUnchanged)
+      (clone-instance
+        current-instance
+        newProps
+        (if childrenUnchanged
+          (:children current-instance)
+          (atom []))
+        (let [style-changed (style-change-requires-layout? oldProps newProps)
+              children-changed (not childrenUnchanged)]
+            #_(when (or style-changed children-changed)
+              (log/info "checking layout required for" (keyword type) "oldkey" (get oldProps :key) "newkey" (get newProps :key) "style changed" style-changed "children changed" children-changed))
+            (cond
+              style-changed
+                :style-changed
+              children-changed
+                :children-changed
+              :else
+                :cloned))))})
 
 (defn context
   ([]
@@ -629,12 +810,12 @@
   [element]
   #_(log/trace "element" element)
   (if (vector? element)
-    (let [[t props children host-dom requires-layout] element]
+    (let [[t props children host-dom layout-required] element]
       [t
        (dissoc props :children)
        (mapv clj-elements (if children @children []))
        host-dom
-       requires-layout])
+       layout-required])
     element))
 
 
