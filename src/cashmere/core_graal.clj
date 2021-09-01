@@ -1,11 +1,15 @@
 (ns cashmere.core-graal
-  (:require [cashmere.template :as gt]
+  (:require [cashmere.instance :as ci]
+            [cashmere.template :as gt]
+            [cashmere.util :as cu]
             [criterium.core :as cc]
             [taoensso.timbre :as log]
+            [io.aviso.exception]
             [clojure.data]
             [clojure.inspector]
             [clojure.java.io]
-            [clojure.core.async :refer [chan go go-loop sliding-buffer <!! <! >! >!!]])
+            [clojure.string]
+            [clojure.core.async :as async :refer [alt! chan go go-loop put! sliding-buffer <!! <! >! >!!]])
   (:import (org.graalvm.polyglot Context Context$Builder PolyglotException Source Value)
            (org.graalvm.polyglot.proxy ProxyArray ProxyExecutable ProxyObject)))
 
@@ -14,9 +18,106 @@
 
 (def language-id "js")
 (def ^:dynamic *context* nil)
+;; stream of 0-arity fns to execute on main thread
+(def ^:dynamic *callback-chan* (chan))
 
-(declare clj->value)
-(declare value->clj)
+;; From taoensso/timbre
+(defn ^:private convert-to-clojure
+  [class-name method-name]
+  (let [[namespace-name & raw-function-ids] (clojure.string/split class-name #"\$")
+        ;; Clojure adds __1234 unique ids to the ends of things, remove those.
+        function-ids (map #(clojure.string/replace % #"__\d+" "") raw-function-ids)
+        ;; In a degenerate case, a protocol method could be called "invoke" or "doInvoke"; we're ignoring
+        ;; that possibility here and assuming it's the IFn.invoke(), doInvoke() or
+        ;; the invokeStatic method introduced with direct linking in Clojure 1.8.
+        all-ids      (if (#{"invoke" "doInvoke" "invokeStatic" "invokePrim"} method-name)
+                       function-ids
+                       (-> function-ids vec (conj method-name)))]
+    ;; The assumption is that no real namespace or function name will contain underscores (the underscores
+    ;; are name-mangled dashes).
+    (->>
+      (cons namespace-name all-ids)
+      (map io.aviso.exception/demangle))))
+
+;; From io.aviso.exception
+(defn ^:private strip-prefix
+  [^String prefix ^String input]
+  (let [prefix-len (.length prefix)]
+    ;; clojure.string/starts-with? not available in Clojure 1.7.0, so:
+    (if (and (.startsWith input prefix)
+             (< prefix-len (.length input)))
+      (subs input prefix-len)
+      input)))
+
+;; From io.aviso.exception
+(defn ^:private extension
+  [^String file-name]
+  (let [x (.lastIndexOf file-name ".")]
+    (when (<= 0 x)
+      (subs file-name (inc x)))))
+
+;; From io.aviso.exception
+(def ^:private clojure-extensions
+  #{"clj" "cljc"})
+
+;; From io.aviso.exception
+(defn ^:private expand-stack-trace-element
+  ;[file-name-prefix ^PolyglotException$StackFrame element]
+  [file-name-prefix element]
+  (let [host-element  (.toHostFrame element)
+        class-name  (.getClassName host-element)
+        method-name (.getMethodName host-element)
+        dotx        (.lastIndexOf class-name ".")
+        #_#_source-section (.getSourceLocation element)
+        #_#_source      (when source-section (.getSource source-section))
+        #_#_file-name   (or (when source (.getName source)) "")
+        file-name   (or (.getFileName host-element) "")
+        is-clojure? (->> file-name extension (contains? clojure-extensions))
+        names       (if is-clojure? (convert-to-clojure class-name method-name) [])
+        name        (clojure.string/join "/" names)
+        ; This pattern comes from somewhere inside nREPL, I believe
+        [file line] (if (re-matches #"form-init\d+\.clj" file-name)
+                      ["REPL Input"]
+                      [(strip-prefix file-name-prefix file-name)
+                       (-> host-element .getLineNumber)])]
+    ;(log/info "file-name" file-name "host-file-name" (or (.getFileName host-element) ""))
+    {:file         file
+     ; line will sometimes be nil
+     :line         (if (and line
+                            (pos? line))
+                     line)
+     :class        class-name
+     :package      (if (pos? dotx) (.substring class-name 0 dotx))
+     :is-clojure?  is-clojure?
+     :simple-class (if (pos? dotx)
+                     (.substring class-name (inc dotx))
+                     class-name)
+     :method       method-name
+     ;; Used to calculate column width
+     :name         name
+     ;; Used to present compound Clojure name with last term highlighted
+     :names        names}))
+
+;; From io.aviso.exception
+(def ^:private empty-stack-trace-warning
+  "Stack trace of root exception is empty; this is likely due to a JVM optimization that can be disabled with -XX:-OmitStackTraceInFastThrow.")
+
+;; From io.aviso.exception
+(def ^:private current-dir-prefix
+  "Convert the current directory (via property 'user.dir') into a prefix to be omitted from file names."
+  (delay (str (System/getProperty "user.dir") "/")))
+
+(defn expand-polygot-stack-trace
+  [^PolyglotException polyglot-exception]
+  (let [elements (map (partial expand-stack-trace-element @current-dir-prefix) (.getPolyglotStackTrace polyglot-exception))]
+    (when (empty? elements)
+      (binding [*out* *err*]
+        (println empty-stack-trace-warning)
+        (flush)))
+    elements))
+
+(declare clj->js)
+(declare js->clj)
 
 ;; Empty object for context locking
 ;; Locking on the Graal context itself did not work
@@ -28,10 +129,13 @@
   [^Value execable & args]
   (locking ctx-lock
     (try
-      (let [result (.execute execable (object-array args))]
-        (value->clj result))
+      (log/trace "===== Executing Javascript Function ====")
+      (log/trace "fn" execable #_#_"with" args)
+      (let [result (.execute execable (object-array (map clj->js args)))]
+        (js->clj result))
       (catch PolyglotException pe
-        (log/error (.getPolyglotStackTrace pe)))
+        (with-redefs [io.aviso.exception/expand-stack-trace expand-polygot-stack-trace]
+          (log/error pe)))
       (catch Throwable t
         (log/error t)))))
 
@@ -63,7 +167,7 @@
       #_(log/trace "mo has members" (.getMemberKeys mo))
       (when (.hasMember mo "type")
         (when-let [t (.getMember mo "type")]
-          (let [type-string (value->clj t)]
+          (let [type-string (js->clj t)]
             #_(log/trace "meta-type" type-string "for" v (type t))
             #_(log/trace (contains? #{"symbol"} type-string))
             #_(log/trace (= "symbol" type-string))
@@ -77,8 +181,8 @@
 
 ;  Returns a Clojure (or Java) value for given polyglot Value if possible,
 ;     otherwise throws.
-(defmulti value->clj (fn [^Value v]
-  #_(log/info "value->clj" v (type v)
+(defmulti js->clj (fn [^Value v]
+  #_(log/info "js->clj" v (type v)
   "\n.isHostObject" (.isHostObject v)
   "\n.canExecute" (.canExecute v)
   "\n.canInstantiate" (.canInstantiate v)
@@ -115,65 +219,65 @@
     #_(log/trace "dispatching to" dispatch)
     dispatch)))
 
-(defmethod value->clj :nil
+(defmethod js->clj :nil
   [^Value v]
   nil)
 
-(defmethod value->clj :host-object
+(defmethod js->clj :host-object
   [^Value v]
   ;(log/trace "host-object" (.asHostObject v) (type (.asHostObject v)))
   (.asHostObject v))
 
-(defmethod value->clj :boolean
+(defmethod js->clj :boolean
   [^Value v]
   (.asBoolean v))
 
-(defmethod value->clj :string
+(defmethod js->clj :string
   [^Value v]
   (let [s (.asString v)]
     (if (clojure.string/starts-with? s ":")
       (keyword (subs s 1))
       s)))
 
-(defmethod value->clj :number
+(defmethod js->clj :number
   [^Value v]
   (.as v Number))
 
-(defmethod value->clj :fn
+(defmethod js->clj :fn
   [^Value v]
   (reify-ifn v))
 
-(defmethod value->clj :symbol
+(defmethod js->clj :symbol
   [^Value v]
   (keyword (str v)))
 
-(defmethod value->clj :meta
+(defmethod js->clj :meta
   [^Value v]
   (let [mo (.getMetaObject v)]
-    (log/info "value->clj mo" mo)
+    (log/info "js->clj mo" mo)
     #_(when (.hasMembers v)
       (doseq [k (.getMemberKeys v)]
         (log/trace k (.getMember v k))))
     ; Turn meta objects into clj
-    (value->clj mo)))
+    (js->clj mo)))
 
-(defmethod value->clj :array
+(defmethod js->clj :array
   [^Value v]
   (into []
         (for [i (range (.getArraySize v))]
-          (value->clj (.getArrayElement v i)))))
+          (js->clj (.getArrayElement v i)))))
 
-(defmethod value->clj :props
+(defmethod js->clj :props
   [^Value v]
   #_(log/info "Got props" v (type v))
-  (let [internal-props (value->clj (.getMember v "__props__"))
+  (let [internal-props (js->clj (.getMember v "__props__"))
         react-props (into {}
                        (for [k (.getMemberKeys v)
                              :when (not (= k "__props__"))
                              :let [prop-v (.getMember v k)]]
                          (let [k (get {"children" :children} k k)]
                            #_(log/info "map value" k prop-v (type prop-v))  
-                           [k (value->clj prop-v)])))
+                           [k (js->clj prop-v)])))
         props (merge internal-props
                      react-props)]
     #_(log/info "internal-props" internal-props)
@@ -181,11 +285,33 @@
     #_(log/info "Resulting props children " (get props :children))
     props))
 
+(def key-blocklist
+  #{"return"
+    "child"
+    ; one of these
+    ;"elementType"
+    ;"type"
+    ;"stateNode"
+    ;"tag"
+    ;"key"
+    "current"
+    ;"_owner"
+    ;"_debugOwner"
+    "firstEffect"
+    "nextEffect"
+    "lastEffect"
+    "lane"
+    "alternate"
+    "next"
+    "pendingProps"
+    "memoizedProps"
+    })
+
 (defn fiber?
   [ks]
   (= #{"tag" "key" "elementType" "type" "stateNode" "return" "child" "sibling" "index" "ref" "pendingProps" "memoizedProps" "updateQueue" "memoizedState" "dependencies" "mode" "effectTag" "nextEffect" "firstEffect" "lastEffect" "expirationTime" "childExpirationTime" "alternate" "actualDuration" "actualStartTime" "selfBaseDuration" "treeBaseDuration" "_debugID" "_debugIsCurrentlyTiming" "_debugSource" "_debugOwner" "_debugNeedsRemount" "_debugHookTypes"} (set ks)))
 
-(defmethod value->clj :object
+(defmethod js->clj :object
   [^Value v]
   #_(log/trace "Got object" v (type v))
   #_(log/info "Got object ks" (.getMemberKeys v))
@@ -195,29 +321,19 @@
              ks)]
     (into {}
       (for [k ks]
+        (do
+        #_(log/info "k" k)
         ; Don't recurse up to the parent
         [k
-         (if (contains? #{"return"
-                          "child"
-                          ; one of these
-                          #_"elementType"
-                          #_"type"
-                          #_"stateNode"
-                          #_"tag"
-                          #_"key"
-                          #_"current"
-                          "_owner"
-                          "_debugOwner" "nextEffect" "next"
-                          "pendingProps" "memoizedProps"
-                          } k)
-             v
-             (value->clj (.getMember v k)))]))))
+         (if (contains? key-blocklist k)
+           nil
+           (js->clj (.getMember v k)))])))))
 
-(defmethod value->clj :proxy
+(defmethod js->clj :proxy
   [^Value v]
   (.asProxyObject v))
 
-(defmulti clj->value (fn [x] 
+(defmulti clj->js (fn [x] 
   (cond
     (nil? x) :nil
     (fn? x) :fn
@@ -228,8 +344,8 @@
     (set? x) :seq
     (keyword? x) :keyword
     :else :default)))
-(defmethod clj->value :nil [x] (Value/asValue x))
-(defmethod clj->value :fn [x]
+(defmethod clj->js :nil [x] (Value/asValue x))
+(defmethod clj->js :fn [x]
   "Returns a ProxyExecutable instance for given function, allowing it to be
      invoked from polyglot contexts."
   (Value/asValue 
@@ -240,24 +356,25 @@
       (execute [_this args]
         #_(log/info "===== Executing Clojure Function ====")
         #_(log/info "fn" x)
-        (let [clj-args (mapv value->clj args)]
-          #_(log/trace "clj arg " clj-args)
-          (try
-            (clj->value (apply x clj-args))
-            (catch PolyglotException pe
-              (log/error (.getPolyglotStackTrace pe))
-              (throw pe))
-            (catch Throwable t
-              (log/error t)
-              (throw t))))))))
+        (try
+          (let [clj-args (mapv js->clj args)]
+            #_(log/info "clj arg " clj-args)
+            (clj->js (apply x clj-args)))
+          (catch PolyglotException pe
+            (with-redefs [io.aviso.exception/expand-stack-trace expand-polygot-stack-trace]
+              (log/error pe))
+            (throw pe))
+          (catch Throwable t
+            (log/error t)
+            (throw t)))))))
 
-(defn clj-map->value
+(defn clj-map->js
   [m]
   (Value/asValue
     (reify ProxyObject
       ; Object  getMember(String key)
       ; Returns the value of the member.
-      (getMember [_this k] (clj->value (get m k)))
+      (getMember [_this k] (clj->js (get m k)))
       ; Object  getMemberKeys()
       ; Returns array of member keys.
       (getMemberKeys [_this] (into-array String (map str (keys m))))
@@ -271,23 +388,23 @@
       ; Removes a member key and its value.
       (removeMember [_this k]))))
 
-(defmethod clj->value :map [x]
+(defmethod clj->js :map [x]
   #_(log/trace "map object" x)
   (Value/asValue
     (apply hash-map
       (mapcat (fn [[k v]]
-        [k #_(clj->value k)
-         (clj->value v)])
+        [k #_(clj->js k)
+         (clj->js v)])
         x))))
 
-(defn clj-seq->value
+(defn clj-seq->js
   [s]
   (let [v (vec s)]
     (Value/asValue
       (reify ProxyArray
         ;get(long index)
         ;Returns the element at the given index.
-        (get [_this index] (clj->value (nth v index)))
+        (get [_this index] (clj->js (nth v index)))
         ;long  getSize()
         (getSize [_this] (count v))
         ;Returns the reported size of the array.
@@ -297,26 +414,26 @@
         ;void  set(long index, Value value)
         (set [_this index value])))))
 
-(defmethod clj->value :seq [x]
+(defmethod clj->js :seq [x]
   (let [v (vec x)]
   (Value/asValue
     ;(ProxyArray/fromList
       ;(java.util.ArrayList.
-        (mapv clj->value v))))
+        (mapv clj->js v))))
 
 (def ^:dynamic *create-symbol* nil)
-(defmethod clj->value :keyword [x]
+(defmethod clj->js :keyword [x]
   (log/info "create symbol" *create-symbol*)
   (if *create-symbol*
     (*create-symbol* (name x))
     (Value/asValue (str ":" (name x)))))
 
-(defmethod clj->value :default [x]
+(defmethod clj->js :default [x]
   (Value/asValue x))
 
-(defn props->value
+(defn props->js
   [props]
-  #_(log/trace "props->value" props (type props))
+  #_(log/trace "props->js" props (type props))
   (if (instance? Value props)
     props
     (Value/asValue
@@ -329,9 +446,9 @@
               ["ref" original])
             []))))))
 
-(defn component->value
+(defn component->js
   [component]
-  #_(log/trace "component->value" component)
+  #_(log/trace "component->js" component)
   (let [m {"displayName" (or (some-> component meta :display-name str) "Unknown")}]
     (Value/asValue 
       (if (fn? component)
@@ -341,7 +458,7 @@
             (log/trace "===== Executing Clojure Component Function ====")
             (log/trace "fn" component)
             (try
-              (let [[props context] (mapv value->clj args)
+              (let [[props context] (mapv js->clj args)
                     ; unwrap cashmere (__props__) and reagent (:argv) nonsense
                     argv-props (get-in props [:argv 1])
                     props (merge argv-props
@@ -349,13 +466,14 @@
                 (log/trace "Props" props)
                 (component props context))
               (catch PolyglotException pe
-                (log/error (.getPolyglotStackTrace pe)))
+                (with-redefs [io.aviso.exception/expand-stack-trace expand-polygot-stack-trace]
+                  (log/error pe)))
               (catch Throwable t
                 (log/error t))))
           ProxyObject
           ; Object  getMember(String key)
           ; Returns the value of the member.
-          (getMember [_this k] (clj->value (get m k)))
+          (getMember [_this k] (clj->js (get m k)))
           ; Object  getMemberKeys()
           ; Returns array of member keys.
           (getMemberKeys [_this] (into-array String (map str (keys m))))
@@ -371,53 +489,71 @@
         (str component)))))
 
 (def ^Context$Builder context-builder
-  (let [builder (doto (Context/newBuilder (into-array String [language-id]))
-     (.option "js.timer-resolution" "1")
-     (.option "js.java-package-globals" "true")
-     (.out System/out)
-     (.err System/err)
-     (.allowAllAccess true)
-     (.allowNativeAccess true))]
-  (if false
-    (let [port "4242"
-          path (str (java.util.UUID/randomUUID))
-          remoteConnect "true"
-          hostAdress  "localhost"
-          url (format "chrome-devtools://devtools/bundled/js_app.html?ws=%s:%s/%s"
-                      hostAdress port path)]
-      (log/info "Debug @ " url)
-      (doto builder
-        (.option "inspect" port)
-        #_(.option "inspect.Path" path)
-        #_(.option "inspect.Remote" remoteConnect)))
-    builder)))
+  (let [cwd (-> (java.io.File. ".") .getAbsolutePath)
+        require-cwd (str cwd "/src")
+        _ (log/info "require-cwd" require-cwd)
+        builder (doto (Context/newBuilder (into-array String [language-id]))
+                  (.allowExperimentalOptions true)
+                  (.option "js.timer-resolution" "1")
+                  (.option "js.java-package-globals" "true")
+                  (.option "js.commonjs-require" "true")
+                  (.option "js.commonjs-require-cwd" require-cwd)
+                  (.option "js.experimental-foreign-object-prototype" "true")
+                  (.out System/out)
+                  (.err System/err)
+                  (.allowIO true)
+                  (.allowAllAccess true)
+                  (.allowNativeAccess true))]
+    (log/info (-> (java.io.File. ".") .getAbsolutePath))
+    (if false
+      (let [port "4242"
+            path (str (java.util.UUID/randomUUID))
+            remoteConnect "true"
+            hostAdress  "localhost"
+            url (format "chrome-devtools://devtools/bundled/js_app.html?ws=%s:%s/%s"
+                        hostAdress port path)]
+        (log/info "Debug @ " url)
+        (doto builder
+          (.option "inspect" port)
+          #_(.option "inspect.Path" path)
+          #_(.option "inspect.Remote" remoteConnect)))
+      builder)))
 
-(defn simple-clj->value
+(defn simple-clj->js
   [x]
   (if (fn? x)
-    (clj->value x)
+    (clj->js x)
     (Value/asValue x)))
 
 (def ^:private exec-cache (atom {}))
+(defn js-fn [^Context context fn-name]
+  (if-let [^Value fn-ref (-> exec-cache deref (get fn-name))]
+    fn-ref
+    (let [fn-ref (.eval context language-id fn-name)]
+      (swap! exec-cache assoc fn-name fn-ref)
+      fn-ref)))
+
 (defn execute-fn [^Context context fn-name & args]
-  ;; Javascript execution is single-threaded. Restrict concurrent access to evaluation
+  "Execute Javascript function by name. Args are not marshalled. Result not marshalled.
+   Javascript execution is single-threaded. Restrict concurrent access to evaluation"
   (locking ctx-lock
     (try
-    (let [fn-ref (if-let [fn-ref (-> exec-cache deref (get fn-name))]
-                   fn-ref
-                   (let [fn-ref (.eval context language-id fn-name)]
-                     (swap! exec-cache assoc fn-name fn-ref)
-                     fn-ref))
-          arg-vals (into-array Object args)]
-      (assert (.canExecute fn-ref) (str "cannot execute " fn-name))
-      (.execute fn-ref arg-vals))
+      (let [^Value fn-ref (js-fn context fn-name)
+            arg-vals (into-array Object args)]
+        (assert (.canExecute fn-ref) (str "cannot execute " fn-name))
+        (.execute fn-ref arg-vals))
     (catch PolyglotException pe
       (log/error "error executing" fn-name)
       (when-let [message (.getMessage pe)]
         (log/error message))
-      (log/error (.getPolyglotStackTrace pe)))
+      (with-redefs [io.aviso.exception/expand-stack-trace expand-polygot-stack-trace]
+        (log/error pe)))
     (catch Throwable t
       (log/error t)))))
+
+(defn call-fn [^Context context fn-name & args]
+  "Execute Javascript function by name. Args are marshalled. Result is marshalled"
+  (js->clj (execute-fn context fn-name (map clj->js args))))
 
 
 (def reflow-css-keys
@@ -452,64 +588,44 @@
     :content
     })
 
-(defrecord Instance [element-type props children host-dom layout-required last-children style-map]
-  Object
-  (toString [this]
-    (select-keys this [:element-type :props :children])))
+(defn pre-walk-instances
+  [f e]
+  (if (ci/cashmere-instance? e)
+    (let [new-e (f e)]
+      (update new-e :children
+        (fn [children-atom]
+          (let [children (vec @children-atom)
+                new-children (mapv (partial pre-walk-instances f)
+                               children)]
+            (atom
+              new-children)))))
+    e))
 
-(defn new-instance
-  ([element-type props]
-    (new-instance element-type props []))
-  ([element-type props children]
-    (->Instance
-      element-type
-      props
-      (atom children)
-      (atom nil)
-      :new-instance
-      nil
-      nil)))
+(defn pre-walk-instances-with-parent
+  ([f e]
+    (pre-walk-instances-with-parent f e nil))
+  ([f e parent]
+    (if (ci/cashmere-instance? e)
+      (let [new-e (f e parent)]
+        (update new-e :children
+          (fn [children-atom]
+            (let [children (vec @children-atom)
+                  new-children (mapv (fn [child] (pre-walk-instances-with-parent f child new-e))
+                                 children)]
+              (atom
+                new-children)))))
+      e)))
 
-(defn spaces-same?
-  [s1 s2]
-  (= (->> s1
-       (re-seq #"\\s")
-       (map count))
-     (->> s1
-       (re-seq #"\\s")
-       (map count))))
-
-(defn text-instance-layout-required
-  [last-text new-text]
-  (cond
-    ; no change in text
-    (= last-text new-text)
-      :text-same
-    ; same length and spaces same?
-    (and
-      (= (count last-text)
-         (count new-text))
-      (spaces-same? last-text new-text))
-      :text-updated
-    ; diff length or diff spaces
-    :else
-      :text-changed))
-
-(defn new-text-instance
-  ([props text]
-    (new-text-instance props text nil))
-  ([props text old-text]
-    #_(log/info "new-text-instance old-text:" old-text)
-    (->Instance
-      :raw-text
-      props
-      (atom [text])
-      (atom nil)
-      (if old-text
-        (text-instance-layout-required old-text text)
-        :new-text-instance)
-      false
-      nil)))
+(defn post-walk-instances
+  [f e]
+  (if (ci/cashmere-instance? e)
+    (f
+      (update e :children
+        (fn [children-atom]
+          (atom
+            (mapv (partial post-walk-instances f)
+               @children-atom)))))
+    e))
 
 (defn clone-instance
   [instance new-props new-children layout-required]
@@ -524,7 +640,17 @@
 
 (defn conj-child!
   [instance child]
-  #_(log/info "conj-child!" (:element-type instance) (:element-type child) "last-children" (some-> instance :last-children count))
+  #_(log/debug "conj-child! parent"
+    (:element-type instance)
+    "key:" (get-in instance [:props :key])
+    "last-children" (some-> instance :last-children count)
+    "layout-required:" (get instance :layout-required)
+    "child:"
+    (:element-type child)
+    "key=" (get-in child [:props :key])
+    "layout-required:" (get child :layout-required)
+    ;"last-children" (some-> child :last-children)
+    "host-dom" (some-> child :host-dom deref))
   (let [child-instance
          (if-let [last-children (:last-children instance)]
            (let [last-index (-> instance :children deref count)]
@@ -539,7 +665,7 @@
                       (:element-type last-child))
                      (let [last-text (-> last-child :children deref first)
                            new-text (-> child :children deref first)
-                           layout-required (text-instance-layout-required last-text new-text)]
+                           layout-required (ci/text-instance-layout-required last-text new-text)]
                        #_(log/info "last-text" last-text)
                        #_(log/info "new-text" new-text)
                        #_(log/info "layout-required" layout-required)
@@ -549,7 +675,19 @@
                    :else
                      child))
                child))
-           child)]
+           child)
+           child-instance (cond->> child-instance
+                                   ; Set :cloned to all children recursively if child has last-children
+                                   ; ie been cloned
+                                   ; FIXME: is this the right approach? it breaks word wrapping later on in zaffre
+                                   (:last-children child)
+                                   (pre-walk-instances
+                                     (fn [instance]
+                                       (log/info "cloned parent instance. Setting child :layout-required to :cloned key=" (get-in instance [:props :key]) "host-dom" (some-> instance :host-dom deref))
+                                       ; TODO: should this be :cloned or something else? copy parent layout?
+                                       (cond-> instance
+                                         (some-> instance :host-dom deref)
+                                         (assoc :layout-required :cloned)))))]
     (swap! (:children instance) conj child-instance)))
 
 (defn reset-children!
@@ -561,32 +699,6 @@
   [instance f & more]
   (apply swap! (:children instance) f more)
   instance)
-
-(defn pre-walk-instances
-  [f e]
-  (if (instance? Instance e)
-    (-> e
-      f
-      (update :children
-        (fn [children-atom]
-          (let [children (vec @children-atom)
-                new-children (mapv (partial pre-walk-instances f)
-                   children)]
-            (atom
-              new-children)))))
-    e))
-  
-(defn post-walk-instances
-  [f e]
-  (if (instance? Instance e)
-    (-> e
-      (update :children
-        (fn [children-atom]
-          (atom
-            (mapv (partial post-walk-instances f)
-                 @children-atom))))
-      f)
-    e))
 
 (defn style-change-requires-layout?
   [old-props new-props]
@@ -610,12 +722,11 @@
       (or (string? element-type)
           (number? element-type)))
     "createInstance" (fn createInstance [type props root-container-instance host-context internal-instance-handle]
-      (log/info "createInstance" type props)
       ; type, props, children, host-dom, rquires-layout
-      (new-instance (keyword type) props))
+      (ci/new-instance (keyword type) props))
     "createTextInstance" (fn createTextInstance [new-text root-container-instance host-context work-in-progress]
       ; TODO: cleanup
-      (new-text-instance {} new-text))
+      (ci/new-text-instance {} new-text))
     "supportsPersistence" true
     ;; Persistence API
     "appendInitialChild" (fn appendInitialChild [parent child]
@@ -656,7 +767,7 @@
       {})
     "cloneInstance" (fn cloneInstance [current-instance updatePayload type oldProps newProps workInProgress childrenUnchanged recyclableInstance]
       ; From https://codeclimate.com/github/facebook/react/packages/react-noop-renderer/src/createReactNoop.js/source
-      #_(log/info "cloneInstance"  type @(:children current-instance) oldProps newProps childrenUnchanged)
+      (log/info "cloneInstance"  type (get newProps :key) "children unchanged" childrenUnchanged)
       (clone-instance
         current-instance
         newProps
@@ -674,81 +785,6 @@
                 :children-changed
               :else
                 :cloned))))})
-
-(defn context
-  ([]
-    (context default-host-config))
-  ([host-config]
-   {:post [(some? %)]}
-  (try
-    (let [^Context context (.build context-builder)
-          source (slurp (clojure.java.io/resource 
-                   "node_modules/jvm-npm/src/main/javascript/jvm-npm.js" ))
-         oa-source (slurp (clojure.java.io/resource 
-                   "node_modules/object-assign/index.js" ))]
-      (assert (some? context))
-      ; Fake node.env.NODE_ENV
-      (.eval context language-id "process = {env: {NODE_ENV:'development'}};")
-      (-> context
-        (.getBindings language-id)
-        (.putMember "jvm_npm_source" (Value/asValue source)))
-      (-> context
-        (.getBindings language-id)
-        (.putMember "oa_source" (Value/asValue oa-source)))
-      (-> context
-        (.getBindings language-id)
-        (.putMember "hostConfig" (clj-map->value (merge default-host-config host-config))))
-      (assert context)
-      ;; Adapted from https://blog.atulr.com/react-custom-renderer-1/
-      (.eval context language-id
-        "
-        load({'name': 'jvm_npm', 'script': jvm_npm_source});
-        React = require('node_modules/react/cjs/react.development.js');
-        Reconciler = require('node_modules/react-reconciler/cjs/react-reconciler.development.js')
-        reconcilerInstance = Reconciler(hostConfig);
-        // Graaljs doesn't come with setTimeout by default :shrug:
-        function setTimeout(fn, timeout) {
-          fn();
-        }
-        const Renderer = {
-          render(element, renderDom, callback) {
-            //print('=== REACT ===');
-            //print(element);
-            //print(JSON.stringify(element));
-            const isAsync = false;
-            const container = reconcilerInstance.createContainer(renderDom, isAsync);
-            const parentComponent = null;
-            reconcilerInstance.updateContainer(
-              element,
-              container,
-              parentComponent,
-              function (context) { callback(context, container);});
-          },
-        }
-        module.exports = Renderer")
-      (assert context)
-      context)
-    (catch PolyglotException pe
-      (log/error (.getMessage pe))
-      (log/error (.getPolyglotStackTrace pe)))
-    (catch Exception e
-      (log/error e)))))
-
-(defn render
-  ([component props]
-    (render component props (atom [])))
-  ([component props container]
-    (render component props container nil))
-  ([component props container callback]
-    #_(log/trace "====== React.render ======")
-    #_(log/trace "component" component)
-    #_(log/trace "props" props)
-    (let [element (gt/as-element [component props])]
-      #_(log/trace "render element" element)
-      (execute-fn *context* "Renderer.render"
-        element
-        container
-        (clj->value (or callback (fn default-callback [& more] (log/trace "default callback" more))))))))
 
 (defn argv->children
   [argv]
@@ -772,8 +808,8 @@
         ^Value element (execute-fn
                    *context*
                    "React.createElement"
-                   (component->value component)
-                   (props->value props)
+                   (component->js component)
+                   (props->js props)
                    children)]
     #_(log/trace "element" element)
     #_(log/trace "element children" (-> element
@@ -782,19 +818,118 @@
     element))
 
 (defmacro with-context
-  [host-config & body]
-  `(binding [*context* (context ~host-config)
-             gt/*create-element* create-element
-             gt/*convert-props* (fn [props# id-class#]
-                                  (props->value props#))]
-     ; Nested binding form because bindings occur in parallel unlike let
-     ; TODO: how to typehint *context* 
-     (binding [*create-symbol* (let [symbol-fn# (-> *context* ^Value (.eval language-id "Symbol"))]
-                                 (fn [s#]
-                                   (log/info "creating symbol" s#)
-                                   (execute symbol-fn# s#)))]
-       (assert *context*)
-       ~@body)))
+  [context & body]
+  `(let [^Context context# ~context]
+    (binding [*context* context#
+               gt/*create-element* create-element
+               gt/*convert-props* (fn [props# id-class#]
+                                    (props->js props#))]
+       ; Nested binding form because bindings occur in parallel unlike let
+       #_(log/info "context" *context*)
+       ; TODO: how to typehint *context* 
+       (binding [*create-symbol* (let [symbol-fn# (.eval context# language-id "Symbol")]
+                                   (fn [s#]
+                                     (log/info "creating symbol" s#)
+                                     (execute symbol-fn# s#)))]
+         (assert *context*)
+         (locking context
+           ~@body)))
+    context#))
+
+(defn context
+  ([]
+    (context default-host-config))
+  ([host-config set-timeout!]
+   {:post [(some? %)]}
+  (try
+    (let [^Context context (.build context-builder)
+          source (slurp (clojure.java.io/resource 
+                    "node_modules/jvm-npm/src/main/javascript/jvm-npm.js" ))
+          oa-source (slurp (clojure.java.io/resource 
+                      "node_modules/object-assign/index.js" ))
+          cwd (-> (java.io.File. ".") .getAbsolutePath)
+          require-cwd (str cwd "/src/node_modules")
+          ; for event loop
+          events (chan (sliding-buffer 100))]
+      (assert (some? source))
+      (assert (some? oa-source))
+      (assert (some? context))
+      ; Fake node.env.NODE_ENV
+      (.eval context language-id "process = {env: {NODE_ENV:'development'}};")
+      (-> context
+        (.getBindings language-id)
+        (.putMember "jvm_npm_source" (Value/asValue source)))
+      (-> context
+        (.getBindings language-id)
+        (.putMember "oa_source" (Value/asValue oa-source)))
+      (-> context
+        (.getBindings language-id)
+        (.putMember "hostConfig" (clj-map->js (merge default-host-config host-config))))
+      (-> context
+        (.getBindings language-id)
+        (.putMember "setTimeout" (clj->js set-timeout!)))
+      (assert context)
+        
+      ;; Adapted from https://blog.atulr.com/react-custom-renderer-1/
+      (.eval context language-id
+        "
+        //ObjectAssign = require('object-assign');
+        //load({'name': 'object-assign', 'script': oa_source});
+        React = require('react');
+        Reconciler = require('react-reconciler')
+        reconcilerInstance = Reconciler(hostConfig);
+        // Graaljs doesn't come with setTimeout by default :shrug:
+        //function setTimeout(fn, timeout) {
+        //  fn();
+        //}
+        const Renderer = {
+          render(element, renderDom, callback) {
+            print('=== REACT ===');
+            print(element);
+            print(JSON.stringify(element));
+            print(setTimeout);
+            print(typeof setTimeout);
+            print(setTimeout instanceof Object);
+            print(print instanceof Object);
+            const isAsync = false;
+            const container = reconcilerInstance.createContainer(renderDom, isAsync);
+            const parentComponent = null;
+            reconcilerInstance.updateContainer(
+              element,
+              container,
+              parentComponent,
+              function (context) { callback(context, container);});
+          },
+        }
+        module.exports = Renderer")
+      (assert context)
+      context)
+    (catch PolyglotException pe
+      (with-redefs [io.aviso.exception/expand-stack-trace expand-polygot-stack-trace]
+        (log/error pe)))
+    (catch Exception e
+      (log/error e)))))
+
+(defmacro with-context-from-host-config
+  [host-config set-timeout! & body]
+  `(with-context (context ~host-config ~set-timeout!) ~@body))
+
+
+(defn render
+  ([component props]
+    (render component props (atom [])))
+  ([component props container]
+    (render component props container nil))
+  ([component props container callback]
+    #_(log/trace "====== React.render ======")
+    #_(log/trace "component" component)
+    #_(log/trace "props" props)
+    (let [element (gt/as-element [component props])]
+      #_(log/trace "render element" element)
+      (execute-fn *context* "Renderer.render"
+        element
+        container
+        (clj->js (or callback (fn default-callback [& more] (log/trace "default callback" more))))))))
 
 (defn clj-element
   [element]
@@ -822,40 +957,56 @@
 (defn render-with-context
   "Returns a function f which when invoked with f & args invokes (apply f args)
   with the bindings present."
-  [component props on-render]
-  (with-context
+  [component props on-render set-timeout!]
+  (with-context-from-host-config
     {"resetAfterCommit" (fn [container]
       (if-let [root-element (-> container deref first)]
         (do
           #_(log/info "Rendered" (clj-elements root-element))
           (on-render root-element))
         (log/warn "root element nil")))}
+    set-timeout!
     (log/info "=== Rendering ===")
-    (render component props)
-    (bound-fn* (fn [f & args] (apply f args)))))
+    (render component props)))
 
 (defmacro defcomponent
   [compname args & body]
-  `(def ~compname (with-meta (fn ~compname  ~args
-     (let [v# (do ~@body)]
-       (gt/as-element v#))) {:display-name (str ~compname)})))
+  `(def ~compname (with-meta
+     (fn ~compname  ~args
+       (try
+         (let [v# (do ~@body)]
+           (gt/as-element v#))
+         (catch Throwable t#
+           (log/error t#))))
+        {:display-name (str ~compname)})))
 
 ;; Hooks API
 (defn use-state
   ([initial-state]
     (use-state initial-state []))
   ([initial-state deps]
-    (let [[state update-fn] (value->clj (execute-fn *context* "React.useState"
-      (simple-clj->value initial-state)
-      (clj->value deps)))]
-      [state (fn [x]
-               (if (fn? x)
-                 (update-fn (clj->value (fn [v]
-                                          (try
-                                            (x v)
-                                            (catch Throwable t
-                                              (log/error t))))))
-                 (update-fn x)))])))
+    ; update-fn is a wrapped js function so args will need to be manually converted
+    #_(log/trace "Invoked use-state with" initial-state deps)
+    (let [[state update-fn!] (js->clj (execute-fn *context* "React.useState"
+                                          (simple-clj->js initial-state)
+                                          (clj->js deps)))
+           set-state! (fn [x]
+                        (if (fn? x)
+                          ; x is an fn
+                          ; Schedule to run on main thread
+                          (go
+                            #_(log/trace "In use-state set-state! go block")
+                            (>! *callback-chan* (fn []
+                              (update-fn! (clj->js (fn [v]
+                                                     
+                                                     (try
+                                                       #_(log/debug "Updating using fn" v x)
+                                                       (x v)
+                                                       (catch Throwable t
+                                                         (log/error t)))))))))
+                          ; x is value
+                          (update-fn! x)))]
+      [state set-state!])))
   
 (defn use-effect
   ([f]
@@ -863,19 +1014,22 @@
   ([f deps]
     ; wrap f so that it already returns a cleaup function
     ; either one supplied by f for a no-op fn
-    #_(log/info "use-effect deps" (type deps) deps (type (clj->value deps)) (clj->value deps))
+    #_(log/info "use-effect deps" (type deps) deps (type (clj->js deps)) (clj->js deps))
+    ; Deps must be convertible to an array
+    (assert (or (nil? deps) (sequential? deps)))
     (letfn [(effect-fn []
               (let [result (f)]
-                (clj->value
+                (clj->js
                   (if (fn? result)
                     result
                     ; Rreturn an empty destroy function if response is not a function
                     (fn use-effect-default-destroy [] nil)))))]
-      (value->clj (execute-fn *context* "React.useEffect" (clj->value effect-fn) (clj->value deps))))))
+        (log/trace "Calling React.useEffect in context" *context*)
+        (js->clj (execute-fn *context* "React.useEffect" (clj->js effect-fn) (clj->js deps))))))
 
 (defn use-context
   [c]
-  (value->clj (execute-fn *context* "React.useContext" c)))
+  (js->clj (execute-fn *context* "React.useContext" c)))
 
 (defn use-reducer
   ([reducer initial-arg]
@@ -885,30 +1039,30 @@
            (vector? %)
            (= (count %) 2)]}
     (letfn [(reducer-fn [state action]
-              (simple-clj->value (reducer state action)))
+              (simple-clj->js (reducer state action)))
             (init-fn [s]
               (Value/asValue (init s)))]
-      (value->clj (execute-fn *context* "React.useReducer"
-        (clj->value reducer-fn)
-        (simple-clj->value initial-arg)
-        (clj->value init-fn))))))
+      (js->clj (execute-fn *context* "React.useReducer"
+        (clj->js reducer-fn)
+        (simple-clj->js initial-arg)
+        (clj->js init-fn))))))
 
 (defn use-callback
   [f deps]
-  (value->clj (execute-fn *context* "React.useCallback" f deps)))
+  (js->clj (execute-fn *context* "React.useCallback" f deps)))
 
 (defn use-memo
   [f deps]
-  (value->clj (execute-fn *context* "React.useMemo" (clj->value f) (clj->value deps))))
+  (js->clj (execute-fn *context* "React.useMemo" (clj->js f) (clj->js deps))))
 
 (defn use-ref
   [initial-value]
-  (let [r (execute-fn *context* "React.useRef" (simple-clj->value initial-value))]
-    (with-meta (value->clj r) {:original r})))
+  (let [r (execute-fn *context* "React.useRef" (simple-clj->js initial-value))]
+    (with-meta (js->clj r) {:original r})))
 
 (defn use-imperative-handle
   [ref createHandle deps]
-  (value->clj (execute-fn *context* "React.useImperativeHandle" ref createHandle deps)))
+  (js->clj (execute-fn *context* "React.useImperativeHandle" ref createHandle deps)))
 
 (defn use-layout-effect
   ([f]
@@ -916,18 +1070,18 @@
   ([f deps]
     ; wrap f so that it already returns a cleaup function
     ; either one supplied by f for a no-op fn
-    #_(log/info "use-effect deps" (type deps) deps (type (clj->value deps)) (clj->value deps))
+    #_(log/info "use-effect deps" (type deps) deps (type (clj->js deps)) (clj->js deps))
     (letfn [(effect-fn []
               (let [result (f)]
-                (clj->value
+                (clj->js
                   (if (fn? result)
                     result
                     ; Rreturn an empty destroy function if response is not a function
                     (fn use-effect-default-destroy [] nil)))))]
-      (value->clj (execute-fn *context* "React.useLayoutEffect" (clj->value effect-fn) (clj->value deps))))))
+      (js->clj (execute-fn *context* "React.useLayoutEffect" (clj->js effect-fn) (clj->js deps))))))
 
 (defn use-debug-value [v]
-  (value->clj (execute-fn *context* "React.useDebugValue" v)))
+  (js->clj (execute-fn *context* "React.useDebugValue" v)))
 
 ;; Demo Section
 (defn thread-name
@@ -942,20 +1096,69 @@
 
 (defcomponent RootComponent
   [props _]
-  [TestComponent {}
-    [:li {:key "1"} 1]
-    [:li {:key "2"} 2]])
+  (let [[seconds set-seconds!] (use-state 0)]
+    (use-effect (fn []
+      (let [stop-chan (chan)]
+        (go-loop []
+          (alt!
+            (async/timeout 1000)
+              (do
+                (try
+                  (set-seconds! inc)
+                  (catch Exception e
+                    (log/error e)))
+                (recur))
+            stop-chan nil))
+        (fn [] (put! stop-chan true))))
+      [seconds])
+    [TestComponent {}
+      [:li {:key "1"} (str seconds)]
+      [:li {:key "2"} 2]]))
 
 (defn -main [& args]
   (try
-    (let [render-chan (render-with-context RootComponent {} (chan (sliding-buffer 1)))]
+    
+    #_(with-context-from-host-config {}
+      (js->clj (execute-fn *context*
+                    "setTimeout"
+                    (clj->js (fn [] (log/info "setTimeout callback")))
+                    (clj->js 0))))
+
+    (let [render-chan (chan (sliding-buffer 1))
+          context (render-with-context
+                    RootComponent {}
+                    (partial >!! render-chan)
+                    ; setTimeout
+                    (fn [f t]
+                      (go
+                        (<! (async/timeout t))
+                        (>! *callback-chan* f))))]
       ; Listen for renders and print them out
       (go-loop []
-        (let [container (<! render-chan)]
-          (log/info "=== Render Callback ===")
-          (log/info "container" (-> container clj-elements)))
-        (recur)))
+        (try
+          (log/info "=== Start of render go-loop ===")
+          (let [container (<! render-chan)]
+            (log/info "== Render Item ==")
+            (log/info "Container\n" (cu/tree->str container))
+            #_(log/debug "container keys" (keys container))
+            #_(log/debug "container" (-> container clj-elements)))
+          (log/info "=== End of render go-loop ===")
+          (catch Exception e
+            (log/error e)))
+        (recur))
+      ; Event loop for setTimeout and setInterval
+    (loop []
+      (log/trace "=== Start of event loop ===")
+      (let [f (<!! *callback-chan*)]
+        (with-context context
+          (try
+            (f)
+            (catch Throwable t
+              (log/error t)))))
+      (log/trace "=== End of event loop ===")
+      (recur)))
     (catch PolyglotException pe
-      (log/error (.getPolyglotStackTrace pe)))
+      (with-redefs [io.aviso.exception/expand-stack-trace expand-polygot-stack-trace]
+        (log/error pe)))
     (catch Exception e
       (log/error e))))

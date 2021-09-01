@@ -3,12 +3,12 @@
   :url "https://github.com/aaron-santos/cashmere"
   :license {:name "EPL-2.0 OR GPL-2.0-or-later WITH Classpath-exception-2.0"
             :url "https://www.eclipse.org/legal/epl-2.0/"}
-  :dependencies [[org.clojure/clojure "1.10.1"]
-                 [org.clojure/core.async "0.7.559"]
+  :dependencies [[org.clojure/clojure "1.10.3"]
+                 [org.clojure/core.async "1.3.618"]
                  [org.clojure/core.cache "1.0.207"]
-                 [org.graalvm.js/js "20.1.0"]
-                 [criterium "0.4.5"]
-                 [com.taoensso/timbre "4.10.0"]]
+                 [org.graalvm.js/js "21.1.0"]
+                 [criterium "0.4.6"]
+                 [com.taoensso/timbre "5.1.2"]]
   :repl-options {:init-ns cashmere.core}
   :plugins [[lein-figwheel "0.5.19"]
             [lein-cljsbuild "1.1.7" :exclusions [[org.clojure/clojure]]]]
@@ -97,8 +97,8 @@
              ;; :server-logfile false
              }
 
-  :profiles {:dev {:dependencies [[binaryage/devtools "0.9.10"]
-                                  [figwheel-sidecar "0.5.19"]]
+  :profiles {:dev {:dependencies [[binaryage/devtools "1.0.3"]
+                                  [figwheel-sidecar "0.5.20"]]
                    ;; need to add dev source path here to get user.clj loaded
                    :source-paths ["src" "dev"]
                    ;; need to add the compliled assets to the :clean-targets
