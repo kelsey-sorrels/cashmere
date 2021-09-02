@@ -1,4 +1,4 @@
-# 𝒞𝒶𝓈𝒽𝓂𝑒𝓇𝑒
+# 𝓒𝓪𝓼𝓱𝓶𝓮𝓻𝓮
 
 A Clojure wrapper for React. Runs React in GraalJS.
 
