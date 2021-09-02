@@ -1,4 +1,4 @@
-![cashmere logo](./resources/logo.png)
+# 𝒞𝒶𝓈𝒽𝓂𝑒𝓇𝑒
 
 A Clojure wrapper for React. Runs React in GraalJS.
 
@@ -6,7 +6,7 @@ A Clojure wrapper for React. Runs React in GraalJS.
 
 ```clojure
 ; Component are like functions which take props and context, and return elements
-(require '[cashmere.core-graal :as g]')
+(require '[cashmere.core :as g]')
 
 (g/defcomponent Counter
   [props context]
@@ -43,7 +43,7 @@ Fork it. Fix it.
 
 -License
 
-Copyright © 2020 Aaron Santos
+Copyright © 2021 Aaron Santos
 
 This program and the accompanying materials are made available under the
 terms of the Eclipse Public License 2.0 which is available at
