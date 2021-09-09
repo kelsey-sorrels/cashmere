@@ -2,7 +2,9 @@
   (:require [clojure.string]
             [clojure.walk :refer [prewalk]]
             [clojure.core.cache :as cache]
-            [taoensso.timbre :as log]))
+            [taoensso.timbre :as log])
+  (:import (org.graalvm.polyglot Value)))
+ 
 
 ; From reagent.impl.util
 (def dont-camel-case #{"aria" "data"})
@@ -97,10 +99,24 @@
   (or (named? x)
       (string? x)))
 
+(defn provider?
+  [x]
+  (and
+    (instance? Value x)
+    (let [typeof (.getMember x "$$typeof")]
+      (when-let [mo (.getMetaObject typeof)]
+        (when-let[mtn (.getMetaQualifiedName mo)]
+          (log/info "mtn" mtn)
+          (log/info "Value typeof str" (.toString typeof))
+          (= (.toString typeof)
+             "Symbol(react.provider)"))))))
+
 (defn valid-tag? [x]
   (or (hiccup-tag? x)
       (ifn? x)
-      (instance? NativeWrapper x)))
+      (instance? NativeWrapper x)
+      ; Context.Provider
+      (provider? x)))
 
 ;;; Props conversion
 
@@ -121,9 +137,13 @@
 (defn kv-conv [o k v]
   (merge o {(cached-prop-name k) (convert-prop-value v)}))
 
+(defn js-val?
+  [x]
+  (instance? Value x))
+
 (defn convert-prop-value [x]
   ; FIXME handle cases
-  (cond #_#_(js-val? x) x
+  (cond (js-val? x) x
         (named? x) (name x)
         (map? x) (reduce-kv kv-conv {} x)
         (coll? x) x #_(clj->js x)
@@ -139,7 +159,7 @@
 
 (defn convert-custom-prop-value [x]
   ; FIXME handle cases
-  (cond #_#_(js-val? x) x
+  (cond (js-val? x) x
         (named? x) (name x)
         (map? x) (reduce-kv custom-kv-conv {} x)
         (coll? x) x #_(clj->js x)
@@ -189,6 +209,7 @@
   (let [[tag id className] (->> hiccup-tag name (re-matches re-tag) next)
         className (when-not (nil? className)
                     (clojure.string/replace className #"\." " "))]
+    (log/info "parse-tag" hiccup-tag tag id className)
     (assert tag (str "Invalid tag: '" hiccup-tag "'" (comp-name)))
     (->HiccupTag tag
                  id
@@ -260,10 +281,12 @@
     ;  (-> [(reagent-input) argv component jsprops first-child]
     ;      (with-meta (meta argv))
     ;      as-element)
-      (do
-        ; FIXME how to set this?
-        #_(when-some [key (-> (meta argv) get-key)]
-          (set! (:key jsprops) key))
+      (let [key (some-> (meta argv) get-key)
+            jsprops (if key (assoc jsprops :key key) jsprops)]
+        (log/info "native-element invoking make-element argv:" argv
+          "\ncomponent:" component
+          "\njsprops:" jsprops
+          "\nfirst-child:" first-child)
         (make-element argv component jsprops first-child))))
 ;)
 
@@ -293,15 +316,20 @@
 
 (defn vec-to-elem [v]
   (assert (pos? (count v)) (hiccup-err v "Hiccup form should not be empty"))
+  (log/info "vec-to-elem" v)
   (let [tag (nth v 0 nil)]
     (assert (valid-tag? tag) (hiccup-err v "Invalid Hiccup form"))
     (cond
       (keyword-identical? :<> tag)
       (fragment-element v)
 
+      (keyword-identical? tag :>)
+      (native-element (->HiccupTag (nth v 1 nil) nil nil nil) v 2)
+
       (hiccup-tag? tag)
       (let [n (str tag)
             pos (.indexOf n ">")]
+        (log/info "vec-to-elem" "n:" n "pos:" pos)
         (case pos
           -1 (native-element (cached-parse n) v 1)
           0 (let [component (nth v 1 nil)]
@@ -325,8 +353,7 @@
 #_(declare expand-seq-dev)
 
 (defn as-element [x]
-  ; FIXME js
-  (cond #_#_(js-val? x) x
+  (cond (js-val? x) x
         (vector? x) (vec-to-elem x)
         (seq? x) ;(if (dev?)
                  ;  (expand-seq-dev x)

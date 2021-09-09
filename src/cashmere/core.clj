@@ -1,4 +1,4 @@
-(ns cashmere.core-graal
+(ns cashmere.core
   (:require [cashmere.instance :as ci]
             [cashmere.template :as gt]
             [cashmere.util :as cu]
@@ -305,6 +305,8 @@
     "next"
     "pendingProps"
     "memoizedProps"
+    ; Context.Provider._context
+    "_context"
     })
 
 (defn fiber?
@@ -313,21 +315,23 @@
 
 (defmethod js->clj :object
   [^Value v]
-  #_(log/trace "Got object" v (type v))
+  #_(log/info "Got object" v (type v))
   #_(log/info "Got object ks" (.getMemberKeys v))
   (let [ks (.getMemberKeys v)
         ks (if (fiber? ks)
              #{"elementType" "type"}
              ks)]
-    (into {}
-      (for [k ks]
-        (do
-        #_(log/info "k" k)
-        ; Don't recurse up to the parent
-        [k
-         (if (contains? key-blocklist k)
-           nil
-           (js->clj (.getMember v k)))])))))
+    (with-meta
+      (into {}
+        (for [k ks]
+          (do
+          #_(log/info "k" k)
+          ; Don't recurse up to the parent
+          [k
+           (if (contains? key-blocklist k)
+             nil
+             (js->clj (.getMember v k)))])))
+      {:value v})))
 
 (defmethod js->clj :proxy
   [^Value v]
@@ -441,6 +445,7 @@
         (apply hash-map
           "__props__" (Value/asValue props)
           "key" (get props :key)
+          "value" (get props :value)
           (if (contains? props :ref)
             (let [original (-> props :ref meta :original)]
               ["ref" original])
@@ -449,44 +454,50 @@
 (defn component->js
   [component]
   #_(log/trace "component->js" component)
-  (let [m {"displayName" (or (some-> component meta :display-name str) "Unknown")}]
-    (Value/asValue 
-      (if (fn? component)
-        (reify
-          ProxyExecutable
-          (execute [_this args]
-            (log/trace "===== Executing Clojure Component Function ====")
-            (log/trace "fn" component)
-            (try
-              (let [[props context] (mapv js->clj args)
-                    ; unwrap cashmere (__props__) and reagent (:argv) nonsense
-                    argv-props (get-in props [:argv 1])
-                    props (merge argv-props
-                                (dissoc props :argv))]
-                (log/trace "Props" props)
-                (component props context))
-              (catch PolyglotException pe
-                (with-redefs [io.aviso.exception/expand-stack-trace expand-polygot-stack-trace]
-                  (log/error pe)))
-              (catch Throwable t
-                (log/error t))))
-          ProxyObject
-          ; Object  getMember(String key)
-          ; Returns the value of the member.
-          (getMember [_this k] (clj->js (get m k)))
-          ; Object  getMemberKeys()
-          ; Returns array of member keys.
-          (getMemberKeys [_this] (into-array String (map str (keys m))))
-          ; boolean   hasMember(String key)
-          ; Returns true if the proxy object contains a member with the given key, or else false.
-          (hasMember [_this k] (contains? m k))
-          ; void  putMember(String key, Value value)
-          ; Sets the value associated with a member.
-          (putMember [_this k v])
-          ; default boolean   removeMember(String key)
-          ; Removes a member key and its value.
-          (removeMember [_this k]))
-        (str component)))))
+  (let [m {"displayName" (or (some-> component meta :display-name str) "Unknown")}
+        v (some-> component meta :value)]
+    ; If the component has an attached meta value then just use that
+    ; Cases where this happens:
+    ; If the component is a context.provider
+    (if v
+      v
+      (Value/asValue 
+        (if (fn? component)
+          (reify
+            ProxyExecutable
+            (execute [_this args]
+              (log/trace "===== Executing Clojure Component Function ====")
+              (log/trace "fn" component)
+              (try
+                (let [[props context] (mapv js->clj args)
+                      ; unwrap cashmere (__props__) and reagent (:argv) nonsense
+                      argv-props (get-in props [:argv 1])
+                      props (merge argv-props
+                                  (dissoc props :argv))]
+                  (log/trace "Props" props)
+                  (component props context))
+                (catch PolyglotException pe
+                  (with-redefs [io.aviso.exception/expand-stack-trace expand-polygot-stack-trace]
+                    (log/error pe)))
+                (catch Throwable t
+                  (log/error t))))
+            ProxyObject
+            ; Object  getMember(String key)
+            ; Returns the value of the member.
+            (getMember [_this k] (clj->js (get m k)))
+            ; Object  getMemberKeys()
+            ; Returns array of member keys.
+            (getMemberKeys [_this] (into-array String (map str (keys m))))
+            ; boolean   hasMember(String key)
+            ; Returns true if the proxy object contains a member with the given key, or else false.
+            (hasMember [_this k] (contains? m k))
+            ; void  putMember(String key, Value value)
+            ; Sets the value associated with a member.
+            (putMember [_this k v])
+            ; default boolean   removeMember(String key)
+            ; Removes a member key and its value.
+            (removeMember [_this k]))
+          (str component))))))
 
 (def ^Context$Builder context-builder
   (let [cwd (-> (java.io.File. ".") .getAbsolutePath)
@@ -795,21 +806,25 @@
 
 (defn create-element
   [component props & children]
-  #_(log/info "====== React.createElement ======")
-  #_(log/info "Type" component)
-  #_(log/info "Props" props)
-  #_(log/info "Type props" (type props))
-  #_(log/info "Children" children)
-  #_(log/info "Type children" (type children))
-  (let [children (if children
+  (log/info "====== React.createElement ======")
+  (log/info "Component" component)
+  (log/info "Props" props)
+  (log/info "Type props" (type props))
+  (log/info "Children" children)
+  (log/info "Type children" (type children))
+  (let [component (component->js component)
+        props (props->js props)
+        children (if children
                    children
                    (let [argv (get props :argv)]
                      (argv->children argv)))
+        _ (log/info "Component" component)
+        _ (log/info "Props" props)
         ^Value element (execute-fn
                    *context*
                    "React.createElement"
-                   (component->js component)
-                   (props->js props)
+                   component
+                   props
                    children)]
     #_(log/trace "element" element)
     #_(log/trace "element children" (-> element
@@ -980,6 +995,14 @@
            (log/error t#))))
         {:display-name (str ~compname)})))
 
+;; React API
+(defn create-context
+  [default-value]
+  (let [context (execute-fn *context* "React.createContext" (simple-clj->js default-value))]
+    (with-meta
+      (js->clj context)
+      {:value context})))
+
 ;; Hooks API
 (defn use-state
   ([initial-state]
@@ -1028,8 +1051,8 @@
         (js->clj (execute-fn *context* "React.useEffect" (clj->js effect-fn) (clj->js deps))))))
 
 (defn use-context
-  [c]
-  (js->clj (execute-fn *context* "React.useContext" c)))
+  [context]
+  (js->clj (execute-fn *context* "React.useContext" (-> context meta :value))))
 
 (defn use-reducer
   ([reducer initial-arg]
@@ -1088,11 +1111,27 @@
   []
   (.getName (Thread/currentThread)))
 
-(defcomponent TestComponent
+(def example-context (delay (create-context {:a "world"})))
+
+(defcomponent ContextLabel
   [props context]
-  (log/trace "TestComponent" props context (thread-name))
+  (log/info "ContextLabel" context)
+  (let [c (use-context @example-context)]
+    (log/info "ContextLabel context:" c)
+    [:str {:key "s"} (str "Hello " (get c :a)"!")]))
+
+(defcomponent TestComponent
+  [props _]
+  (log/trace "TestComponent" props (thread-name))
   [:ul {:key "ul"}
-   (get props :children)])
+   (cons [ContextLabel]
+     (get props :children))])
+
+(defn provider
+  [context]
+  (log/info "context" @context)
+  (log/info "provider meta" (-> @context (get "Provider") meta))
+  (-> @context (get "Provider")))
 
 (defcomponent RootComponent
   [props _]
@@ -1111,9 +1150,11 @@
             stop-chan nil))
         (fn [] (put! stop-chan true))))
       [seconds])
-    [TestComponent {}
-      [:li {:key "1"} (str seconds)]
-      [:li {:key "2"} 2]]))
+    (log/info "RootComponent" (type (provider example-context)) (provider example-context))
+    [:> (provider example-context) {:value {:a "universe"}}
+      [TestComponent
+        [:li {:key "1"} (str seconds)]
+        [:li {:key "2"} 2]]]))
 
 (defn -main [& args]
   (try
