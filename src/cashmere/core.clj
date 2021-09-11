@@ -179,6 +179,34 @@
     (when-let[mtn (.getMetaQualifiedName mo)]
       (= mtn "symbol"))))
 
+
+(def ^:private exec-cache (atom {}))
+(defn js-fn [^Context context fn-name]
+  (if-let [^Value fn-ref (-> exec-cache deref (get fn-name))]
+    fn-ref
+    (let [fn-ref (.eval context language-id fn-name)]
+      (swap! exec-cache assoc fn-name fn-ref)
+      fn-ref)))
+
+(defn execute-fn [^Context context fn-name & args]
+  "Execute Javascript function by name. Args are not marshalled. Result not marshalled.
+   Javascript execution is single-threaded. Restrict concurrent access to evaluation"
+  (locking ctx-lock
+    (try
+      (let [^Value fn-ref (js-fn context fn-name)
+            arg-vals (into-array Object args)]
+        (assert (.canExecute fn-ref) (str "cannot execute " fn-name))
+        (.execute fn-ref arg-vals))
+    (catch PolyglotException pe
+      (log/error "error executing" fn-name)
+      (when-let [message (.getMessage pe)]
+        (log/error message))
+      (with-redefs [io.aviso.exception/expand-stack-trace expand-polygot-stack-trace]
+        (log/error pe)))
+    (catch Throwable t
+      (log/error t)))))
+
+
 ;  Returns a Clojure (or Java) value for given polyglot Value if possible,
 ;     otherwise throws.
 (defmulti js->clj (fn [^Value v]
@@ -249,7 +277,7 @@
 
 (defmethod js->clj :symbol
   [^Value v]
-  (keyword (str v)))
+  (keyword (js->clj (execute-fn  *context* "symbolToString" v))))
 
 (defmethod js->clj :meta
   [^Value v]
@@ -536,32 +564,6 @@
     (clj->js x)
     (Value/asValue x)))
 
-(def ^:private exec-cache (atom {}))
-(defn js-fn [^Context context fn-name]
-  (if-let [^Value fn-ref (-> exec-cache deref (get fn-name))]
-    fn-ref
-    (let [fn-ref (.eval context language-id fn-name)]
-      (swap! exec-cache assoc fn-name fn-ref)
-      fn-ref)))
-
-(defn execute-fn [^Context context fn-name & args]
-  "Execute Javascript function by name. Args are not marshalled. Result not marshalled.
-   Javascript execution is single-threaded. Restrict concurrent access to evaluation"
-  (locking ctx-lock
-    (try
-      (let [^Value fn-ref (js-fn context fn-name)
-            arg-vals (into-array Object args)]
-        (assert (.canExecute fn-ref) (str "cannot execute " fn-name))
-        (.execute fn-ref arg-vals))
-    (catch PolyglotException pe
-      (log/error "error executing" fn-name)
-      (when-let [message (.getMessage pe)]
-        (log/error message))
-      (with-redefs [io.aviso.exception/expand-stack-trace expand-polygot-stack-trace]
-        (log/error pe)))
-    (catch Throwable t
-      (log/error t)))))
-
 (defn call-fn [^Context context fn-name & args]
   "Execute Javascript function by name. Args are marshalled. Result is marshalled"
   (js->clj (execute-fn context fn-name (map clj->js args))))
@@ -799,7 +801,7 @@
 
 (defn argv->children
   [argv]
-  #_(log/info "argv" argv (type argv))
+  (log/info "argv" argv (type argv))
   (if-let [children (drop 2 argv)]
     children
     []))
@@ -813,18 +815,19 @@
   (log/info "Children" children)
   (log/info "Type children" (type children))
   (let [component (component->js component)
-        props (props->js props)
+        jsprops (props->js props)
         children (if children
                    children
                    (let [argv (get props :argv)]
                      (argv->children argv)))
         _ (log/info "Component" component)
-        _ (log/info "Props" props)
+        _ (log/info "Props" jsprops)
+        _ (log/info "Children" children)
         ^Value element (execute-fn
                    *context*
                    "React.createElement"
                    component
-                   props
+                   jsprops
                    children)]
     #_(log/trace "element" element)
     #_(log/trace "element children" (-> element
@@ -897,6 +900,9 @@
         //function setTimeout(fn, timeout) {
         //  fn();
         //}
+        function symbolToString(s) {
+          return s.description;
+        }
         const Renderer = {
           render(element, renderDom, callback) {
             print('=== REACT ===');
@@ -1122,20 +1128,34 @@
 
 (defcomponent TestComponent
   [props _]
-  (log/trace "TestComponent" props (thread-name))
+  (log/info "TestComponent" props (thread-name))
+  (log/info "TestComponent" (some-> props :children vec))
   [:ul {:key "ul"}
-   (cons [ContextLabel]
-     (get props :children))])
+    (cons [ContextLabel]
+    (get props :children))])
 
 (defn provider
   [context]
-  (log/info "context" @context)
-  (log/info "provider meta" (-> @context (get "Provider") meta))
+  ;(log/info "context" @context)
+  ;(log/info "provider meta" (-> @context (get "Provider") meta))
   (-> @context (get "Provider")))
+
+(defn divisible? [a b]
+  (zero? (mod a b)))
+
+(defn prime? [n]
+  (and (> n 1) (not-any? (partial divisible? n) (range 2 n))))
 
 (defcomponent RootComponent
   [props _]
-  (let [[seconds set-seconds!] (use-state 0)]
+  (let [[seconds set-seconds!] (use-state 0)
+        [[prime _] dispatch!] (use-reducer (fn [[_ n] action]
+                                         (case action
+                                           :inc [(prime? (inc n)) (inc n)]
+                                           (do
+                                             (log/error "Unknown dispatch action" action)
+                                             (System/exit 0))))
+                                       [false seconds])]
     (use-effect (fn []
       (let [stop-chan (chan)]
         (go-loop []
@@ -1144,6 +1164,7 @@
               (do
                 (try
                   (set-seconds! inc)
+                  (dispatch! :inc)
                   (catch Exception e
                     (log/error e)))
                 (recur))
@@ -1152,9 +1173,9 @@
       [seconds])
     (log/info "RootComponent" (type (provider example-context)) (provider example-context))
     [:> (provider example-context) {:value {:a "universe"}}
-      [TestComponent
+      [TestComponent {}
         [:li {:key "1"} (str seconds)]
-        [:li {:key "2"} 2]]]))
+        [:li {:key "2"} (str prime)]]]))
 
 (defn -main [& args]
   (try

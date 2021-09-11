@@ -242,6 +242,7 @@
         key (key-from-vec v)
         jsprops (cond-> {:argv v}
                   key (merge {:key key}))]
+    (log/info "reag-element" c jsprops)
     (*create-element* c jsprops)))
 
 (defn fragment-element [argv]
@@ -316,8 +317,8 @@
 
 (defn vec-to-elem [v]
   (assert (pos? (count v)) (hiccup-err v "Hiccup form should not be empty"))
-  (log/info "vec-to-elem" v)
   (let [tag (nth v 0 nil)]
+    (log/info "vec-to-elem" v (hiccup-tag? tag))
     (assert (valid-tag? tag) (hiccup-err v "Invalid Hiccup form"))
     (cond
       (keyword-identical? :<> tag)
