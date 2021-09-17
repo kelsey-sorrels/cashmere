@@ -106,8 +106,8 @@
     (let [typeof (.getMember x "$$typeof")]
       (when-let [mo (.getMetaObject typeof)]
         (when-let[mtn (.getMetaQualifiedName mo)]
-          (log/info "mtn" mtn)
-          (log/info "Value typeof str" (.toString typeof))
+          #_(log/info "mtn" mtn)
+          #_(log/info "Value typeof str" (.toString typeof))
           (= (.toString typeof)
              "Symbol(react.provider)"))))))
 
@@ -209,7 +209,7 @@
   (let [[tag id className] (->> hiccup-tag name (re-matches re-tag) next)
         className (when-not (nil? className)
                     (clojure.string/replace className #"\." " "))]
-    (log/info "parse-tag" hiccup-tag tag id className)
+    #_(log/info "parse-tag" hiccup-tag tag id className)
     (assert tag (str "Invalid tag: '" hiccup-tag "'" (comp-name)))
     (->HiccupTag tag
                  id
@@ -242,7 +242,7 @@
         key (key-from-vec v)
         jsprops (cond-> {:argv v}
                   key (merge {:key key}))]
-    (log/info "reag-element" c jsprops)
+    #_(log/info "reag-element" c jsprops)
     (*create-element* c jsprops)))
 
 (defn fragment-element [argv]
@@ -284,7 +284,7 @@
     ;      as-element)
       (let [key (some-> (meta argv) get-key)
             jsprops (if key (assoc jsprops :key key) jsprops)]
-        (log/info "native-element invoking make-element argv:" argv
+        #_(log/info "native-element invoking make-element argv:" argv
           "\ncomponent:" component
           "\njsprops:" jsprops
           "\nfirst-child:" first-child)
@@ -318,7 +318,7 @@
 (defn vec-to-elem [v]
   (assert (pos? (count v)) (hiccup-err v "Hiccup form should not be empty"))
   (let [tag (nth v 0 nil)]
-    (log/info "vec-to-elem" v (hiccup-tag? tag))
+    #_(log/info "vec-to-elem" v (hiccup-tag? tag))
     (assert (valid-tag? tag) (hiccup-err v "Invalid Hiccup form"))
     (cond
       (keyword-identical? :<> tag)
@@ -330,7 +330,7 @@
       (hiccup-tag? tag)
       (let [n (str tag)
             pos (.indexOf n ">")]
-        (log/info "vec-to-elem" "n:" n "pos:" pos)
+        #_(log/info "vec-to-elem" "n:" n "pos:" pos)
         (case pos
           -1 (native-element (cached-parse n) v 1)
           0 (let [component (nth v 1 nil)]

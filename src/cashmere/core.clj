@@ -137,7 +137,8 @@
         (with-redefs [io.aviso.exception/expand-stack-trace expand-polygot-stack-trace]
           (log/error pe)))
       (catch Throwable t
-        (log/error t)))))
+        (log/error (type t) (str t) "Attempted to execute" execable args)
+        (System/exit 0)))))
 
 ;; From https://gist.github.com/taylorwood/bb3ebfec5d5de3cccc867a9eba216c18
 (defmacro ^:private reify-ifn
@@ -244,7 +245,7 @@
                            (throw (Exception. (str "Unsupported value v:" v " type:" (class v) " mo:" (.getMetaObject v) " mo-type:" (class (.getMetaObject v)))))
                            #_(log/error "Unsupported value v:" v " type:" (class v) " mo:" (.getMetaObject v) " mo-type:" (class (.getMetaObject v)))
                            #_:string))]
-    #_(log/trace "dispatching to" dispatch)
+    #_(log/info "dispatching to" dispatch)
     dispatch)))
 
 (defmethod js->clj :nil
@@ -313,7 +314,7 @@
     #_(log/info "Resulting props children " (get props :children))
     props))
 
-(def key-blocklist
+(def ^:dynamic *key-blocklist*
   #{"return"
     "child"
     ; one of these
@@ -356,7 +357,7 @@
           #_(log/info "k" k)
           ; Don't recurse up to the parent
           [k
-           (if (contains? key-blocklist k)
+           (if (contains? *key-blocklist* k)
              nil
              (js->clj (.getMember v k)))])))
       {:value v})))
@@ -468,16 +469,17 @@
   #_(log/trace "props->js" props (type props))
   (if (instance? Value props)
     props
-    (Value/asValue
-      (ProxyObject/fromMap
-        (apply hash-map
-          "__props__" (Value/asValue props)
-          "key" (get props :key)
-          "value" (get props :value)
-          (if (contains? props :ref)
-            (let [original (-> props :ref meta :original)]
-              ["ref" original])
-            []))))))
+    (let [propsmap (apply hash-map
+                     "__props__" (Value/asValue props)
+                     "key" (get props :key)
+                     "value" (get props :value)
+                     (if-let [original (some-> props :ref meta :original)]
+                       ["ref" original]
+                       []))]
+      (log/info "props->js" propsmap)
+      (Value/asValue
+        (ProxyObject/fromMap
+          propsmap)))))
 
 (defn component->js
   [component]
@@ -801,7 +803,7 @@
 
 (defn argv->children
   [argv]
-  (log/info "argv" argv (type argv))
+  #_(log/info "argv" argv (type argv))
   (if-let [children (drop 2 argv)]
     children
     []))
@@ -811,18 +813,18 @@
   (log/info "====== React.createElement ======")
   (log/info "Component" component)
   (log/info "Props" props)
-  (log/info "Type props" (type props))
-  (log/info "Children" children)
-  (log/info "Type children" (type children))
+  #_(log/info "Type props" (type props))
+  #_(log/info "Children" children)
+  #_(log/info "Type children" (type children))
   (let [component (component->js component)
         jsprops (props->js props)
         children (if children
                    children
                    (let [argv (get props :argv)]
                      (argv->children argv)))
-        _ (log/info "Component" component)
+        #_ (log/info "Component" component)
         _ (log/info "Props" jsprops)
-        _ (log/info "Children" children)
+        #_ (log/info "Children" children)
         ^Value element (execute-fn
                    *context*
                    "React.createElement"
@@ -1071,14 +1073,20 @@
               (simple-clj->js (reducer state action)))
             (init-fn [s]
               (Value/asValue (init s)))]
-      (js->clj (execute-fn *context* "React.useReducer"
-        (clj->js reducer-fn)
-        (simple-clj->js initial-arg)
-        (clj->js init-fn))))))
+      (let [[state dispatch!] (js->clj (execute-fn *context* "React.useReducer"
+                                (clj->js reducer-fn)
+                                (simple-clj->js initial-arg)
+                                (clj->js init-fn)))]
+        [state (fn [action]
+                 (go
+                   #_(log/trace "In use-state set-state! go block")
+                   (>! *callback-chan* (fn []
+                     (dispatch! (clj->js action))))))]))))
+
 
 (defn use-callback
   [f deps]
-  (js->clj (execute-fn *context* "React.useCallback" f deps)))
+  (js->clj (execute-fn *context* "React.useCallback" (clj->js f) (clj->js deps))))
 
 (defn use-memo
   [f deps]
@@ -1087,7 +1095,12 @@
 (defn use-ref
   [initial-value]
   (let [r (execute-fn *context* "React.useRef" (simple-clj->js initial-value))]
-    (with-meta (js->clj r) {:original r})))
+    (binding [*key-blocklist* []]
+      (log/info "React.useRef raw: " r (type r))
+      (log/info "React.useRef clj " (js->clj r) (type (js->clj r)))
+      [(with-meta (js->clj r) {:original r})
+       (fn set-ref! [x]
+         (.pushHashEntry r "current" (clj->js x)))])))
 
 (defn use-imperative-handle
   [ref createHandle deps]
@@ -1155,7 +1168,9 @@
                                            (do
                                              (log/error "Unknown dispatch action" action)
                                              (System/exit 0))))
-                                       [false seconds])]
+                                       [false seconds])
+         [li-1-ref _] (use-ref :initial-value)
+         set-seconds-callback! (use-callback (fn [] (set-seconds! (inc seconds))) [seconds])]
     (use-effect (fn []
       (let [stop-chan (chan)]
         (go-loop []
@@ -1165,16 +1180,17 @@
                 (try
                   (set-seconds! inc)
                   (dispatch! :inc)
+                  (log/info "li-1-ref" li-1-ref)
                   (catch Exception e
                     (log/error e)))
                 (recur))
             stop-chan nil))
         (fn [] (put! stop-chan true))))
       [seconds])
-    (log/info "RootComponent" (type (provider example-context)) (provider example-context))
+    #_(log/info "RootComponent" (type (provider example-context)) (provider example-context))
     [:> (provider example-context) {:value {:a "universe"}}
       [TestComponent {}
-        [:li {:key "1"} (str seconds)]
+        [:li {:key "1" :ref li-1-ref} (str seconds)]
         [:li {:key "2"} (str prime)]]]))
 
 (defn -main [& args]
