@@ -16,6 +16,9 @@
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* true)
 
+;; Export for convenience third party convenience
+(def cashmere-instance? ci/cashmere-instance?)
+
 (def language-id "js")
 (def ^:dynamic *context* nil)
 ;; stream of 0-arity fns to execute on main thread
@@ -125,7 +128,7 @@
 (def ctx-lock {})
 
 ;; Execute a js function
-(defn- execute
+(defn execute
   [^Value execable & args]
   (locking ctx-lock
     (try
@@ -863,25 +866,11 @@
    {:post [(some? %)]}
   (try
     (let [^Context context (.build context-builder)
-          source (slurp (clojure.java.io/resource 
-                    "node_modules/jvm-npm/src/main/javascript/jvm-npm.js" ))
-          oa-source (slurp (clojure.java.io/resource 
-                      "node_modules/object-assign/index.js" ))
-          cwd (-> (java.io.File. ".") .getAbsolutePath)
-          require-cwd (str cwd "/src/node_modules")
           ; for event loop
           events (chan (sliding-buffer 100))]
-      (assert (some? source))
-      (assert (some? oa-source))
       (assert (some? context))
       ; Fake node.env.NODE_ENV
       (.eval context language-id "process = {env: {NODE_ENV:'development'}};")
-      (-> context
-        (.getBindings language-id)
-        (.putMember "jvm_npm_source" (Value/asValue source)))
-      (-> context
-        (.getBindings language-id)
-        (.putMember "oa_source" (Value/asValue oa-source)))
       (-> context
         (.getBindings language-id)
         (.putMember "hostConfig" (clj-map->js (merge default-host-config host-config))))
@@ -893,15 +882,10 @@
       ;; Adapted from https://blog.atulr.com/react-custom-renderer-1/
       (.eval context language-id
         "
-        //ObjectAssign = require('object-assign');
-        //load({'name': 'object-assign', 'script': oa_source});
         React = require('react');
         Reconciler = require('react-reconciler')
         reconcilerInstance = Reconciler(hostConfig);
-        // Graaljs doesn't come with setTimeout by default :shrug:
-        //function setTimeout(fn, timeout) {
-        //  fn();
-        //}
+        // For turning JS symbols into Clojure keywords. There is no way to extract a string repr exclusively on the host side.
         function symbolToString(s) {
           return s.description;
         }
