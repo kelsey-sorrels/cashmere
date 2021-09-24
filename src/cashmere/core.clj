@@ -10,7 +10,14 @@
             [clojure.java.io]
             [clojure.string]
             [clojure.core.async :as async :refer [alt! chan go go-loop put! sliding-buffer <!! <! >! >!!]])
-  (:import (org.graalvm.polyglot Context Context$Builder PolyglotException Source Value)
+  (:import (java.io ByteArrayInputStream)
+           (java.nio ByteBuffer)
+           (java.nio.file Files NoSuchFileException Path)
+           (java.nio.channels Channels)
+           (java.nio.channels SeekableByteChannel)
+           (java.util HashMap)
+           (org.graalvm.polyglot Context Context$Builder PolyglotException Source Value)
+           (org.graalvm.polyglot.io FileSystem)
            (org.graalvm.polyglot.proxy ProxyArray ProxyExecutable ProxyObject)))
 
 (set! *warn-on-reflection* true)
@@ -532,16 +539,107 @@
             (removeMember [_this k]))
           (str component))))))
 
+;; Adapted from https://github.com/nicolasyanncouturier/spring-svelte3-kotlin/blob/47d817244d14089920baa3ad8e8e70a08ff87536/src/main/kotlin/com/github/nicolasyanncouturier/svelte3/ssr/ResourceFS.kt
+(defn resource-filesystem
+  []
+  (proxy [FileSystem] []
+    (checkAccess [path  modes linkOptions]
+      (log/info "checking access for" path)
+	  (if-not (some? (clojure.java.io/resource (str path)))
+        (do
+          (log/info "Could not find path" path)
+		  (throw (NoSuchFileException. (str path))))
+        (log/info "Found path" path)))
+    ;(copy [source target options])
+	(createDirectory [dir attrs]
+      (log/info "creating dir" dir))
+    
+	;default void 	createLink(Path link, Path existing)
+	;default void 	createSymbolicLink(Path link, Path target, FileAttribute<?>... attrs)
+	(delete [path]
+      (log/info "deleting" path))
+	(getEncoding [path] nil)
+	(getMimeType [path]
+		(if-let [resource (clojure.java.io/resource (str path))]
+          (let [_ (log/info "resource" resource)
+				path (Path/of (.toURI resource))]
+            (Files/probeContentType path))
+          ""))
+	;default String 	getPathSeparator()
+    ;; TODO: Get OS sep
+	(getSeparator [] "/")
+	;default Path 	getTempDirectory()
+	;default boolean 	isSameFile(Path path1, Path path2, LinkOption... options)
+	;default void 	move(Path source, Path target, CopyOption... options)
+	(newByteChannel [path options attrs]
+      (log/info "newByteChannel")
+      (log/info "found" (str path))
+      (log/info "found resource" (clojure.java.io/resource (str path)))
+      (let [s (slurp (clojure.java.io/resource (str path)))
+            _ (log/info "slurped" (type s))
+            bs (.getBytes s)
+            nio-channel (Channels/newChannel (ByteArrayInputStream. bs))]
+        (proxy [SeekableByteChannel] []
+         (close [] (.close nio-channel))
+         (isOpen [] (.isOpen nio-channel))
+         (read [^ByteBuffer dst] (.read nio-channel dst))
+         (write [^ByteBuffer src] 
+           (throw (java.lang.UnsupportedOperationException.)))
+	     (position
+           ([]
+	         (throw (java.lang.UnsupportedOperationException.)))
+		   ([newPosition]
+			   (throw (java.lang.UnsupportedOperationException.))))
+	     (size []
+	         (alength bs))
+	     (truncate [size]
+	         (throw (java.lang.UnsupportedOperationException.))))))
+	(newDirectoryStream [dir filter])
+	(parsePath [path]
+      (log/info "parsing path" path)
+      (Path/of (if (.startsWith (str path) "/")
+                 (apply str (rest path))
+                 (str path))
+                (make-array String 0)))
+	;(parsePath [uri])
+	(readAttributes [path attributes options]
+      (log/info "readingAttributes" path attributes options)
+      (try
+		(if-let [resource (clojure.java.io/resource (str path))]
+          (let [_ (log/info "resource" resource)
+				path (Path/of (.toURI resource))
+				_ (log/info "path" path)
+				attributes (Files/readAttributes path attributes options)]
+			(log/info "attributes" attributes)
+			attributes)
+          (do
+            (log/info "Could not find resource" path)
+            {}))
+        (catch Exception e
+          (log/error e)
+          {})))
+	;default Path 	readSymbolicLink(Path link)
+	;default void 	setAttribute(Path path, String attribute, Object value, LinkOption... options)
+	;default void 	setCurrentWorkingDirectory(Path currentWorkingDirectory)
+	(toAbsolutePath [path]
+      (log/info "toAbsolutePath" path)
+      (.toAbsolutePath path))
+	(toRealPath [path linkOptions]
+       (log/info "toRealPath" path)
+        path)))
+     
+
 (def ^Context$Builder context-builder
   (let [cwd (-> (java.io.File. ".") .getAbsolutePath)
         require-cwd (str cwd "/src")
         _ (log/info "require-cwd" require-cwd)
         builder (doto (Context/newBuilder (into-array String [language-id]))
+                  (.fileSystem (resource-filesystem))
                   (.allowExperimentalOptions true)
                   (.option "js.timer-resolution" "1")
                   (.option "js.java-package-globals" "true")
                   (.option "js.commonjs-require" "true")
-                  (.option "js.commonjs-require-cwd" require-cwd)
+                  #_(.option "js.commonjs-require-cwd" require-cwd)
                   (.option "js.experimental-foreign-object-prototype" "true")
                   (.out System/out)
                   (.err System/err)
@@ -847,6 +945,7 @@
                gt/*create-element* create-element
                gt/*convert-props* (fn [props# id-class#]
                                     (props->js props#))]
+       (assert *context* "context nil")
        ; Nested binding form because bindings occur in parallel unlike let
        #_(log/info "context" *context*)
        ; TODO: how to typehint *context* 
@@ -854,7 +953,6 @@
                                    (fn [s#]
                                      (log/info "creating symbol" s#)
                                      (execute symbol-fn# s#)))]
-         (assert *context*)
          (locking context
            ~@body)))
     context#))
@@ -863,7 +961,6 @@
   ([]
     (context default-host-config))
   ([host-config set-timeout!]
-   {:post [(some? %)]}
   (try
     (let [^Context context (.build context-builder)
           ; for event loop
