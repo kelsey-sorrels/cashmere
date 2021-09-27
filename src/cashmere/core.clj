@@ -11,8 +11,9 @@
             [clojure.string]
             [clojure.core.async :as async :refer [alt! chan go go-loop put! sliding-buffer <!! <! >! >!!]])
   (:import (java.io ByteArrayInputStream)
+           (java.net URI)
            (java.nio ByteBuffer)
-           (java.nio.file Files NoSuchFileException Path)
+           (java.nio.file Files FileSystems NoSuchFileException Path Paths)
            (java.nio.channels Channels)
            (java.nio.channels SeekableByteChannel)
            (java.util HashMap)
@@ -486,7 +487,7 @@
                      (if-let [original (some-> props :ref meta :original)]
                        ["ref" original]
                        []))]
-      (log/info "props->js" propsmap)
+      #_(log/info "props->js" propsmap)
       (Value/asValue
         (ProxyObject/fromMap
           propsmap)))))
@@ -539,13 +540,46 @@
             (removeMember [_this k]))
           (str component))))))
 
+; Adapted from https://stackoverflow.com/questions/2044394/how-to-load-program-resources-in-clojure
+(defn resource-stream
+  [name]
+  (let [thr (Thread/currentThread)
+        ldr (.getContextClassLoader thr)]
+    (.getResourceAsStream ldr name)))
+
+(defn resource-url
+  [name]
+  (log/info "resource-url" name (type name))
+  (let [thr (Thread/currentThread)
+        ldr (.getContextClassLoader thr)]
+    (.getResource ldr (str name))))
+
+(defn resource-path
+  [name]
+  (log/info "resource-path" (type name))
+  (if (string? name)
+    (let [s (if (.startsWith (str name) "/")
+                 (apply str (rest name))
+                 (str name))]
+      (log/info "resource-path String" s (type s))
+      (Path/of s (make-array String 0)))
+    (let [^URI uri name]
+      (log/info "resource-path URI" uri)
+      (Path/of uri)))
+  #_(Paths/get (.toURI (resource-url name))))
+
+(defn resource-file
+  [name]
+  (.toFile (resource-url name)))
+
+
 ;; Adapted from https://github.com/nicolasyanncouturier/spring-svelte3-kotlin/blob/47d817244d14089920baa3ad8e8e70a08ff87536/src/main/kotlin/com/github/nicolasyanncouturier/svelte3/ssr/ResourceFS.kt
 (defn resource-filesystem
   []
   (proxy [FileSystem] []
     (checkAccess [path  modes linkOptions]
-      (log/info "checking access for" path)
-	  (if-not (some? (clojure.java.io/resource (str path)))
+      (log/info "checking access for" (type path) path)
+	  (if-not (some? (resource-stream (str path)))
         (do
           (log/info "Could not find path" path)
 		  (throw (NoSuchFileException. (str path))))
@@ -560,11 +594,8 @@
       (log/info "deleting" path))
 	(getEncoding [path] nil)
 	(getMimeType [path]
-		(if-let [resource (clojure.java.io/resource (str path))]
-          (let [_ (log/info "resource" resource)
-				path (Path/of (.toURI resource))]
-            (Files/probeContentType path))
-          ""))
+      (log/info "getMimeType" (type path) path)
+	  (Files/probeContentType path))
 	;default String 	getPathSeparator()
     ;; TODO: Get OS sep
 	(getSeparator [] "/")
@@ -574,11 +605,9 @@
 	(newByteChannel [path options attrs]
       (log/info "newByteChannel")
       (log/info "found" (str path))
-      (log/info "found resource" (clojure.java.io/resource (str path)))
-      (let [s (slurp (clojure.java.io/resource (str path)))
-            _ (log/info "slurped" (type s))
-            bs (.getBytes s)
-            nio-channel (Channels/newChannel (ByteArrayInputStream. bs))]
+      (let [s (resource-stream (str path))
+            _ (log/info "resource-stream" s)
+            nio-channel (Channels/newChannel s)]
         (proxy [SeekableByteChannel] []
          (close [] (.close nio-channel))
          (isOpen [] (.isOpen nio-channel))
@@ -591,31 +620,34 @@
 		   ([newPosition]
 			   (throw (java.lang.UnsupportedOperationException.))))
 	     (size []
-	         (alength bs))
+	         (.available s))
 	     (truncate [size]
 	         (throw (java.lang.UnsupportedOperationException.))))))
 	(newDirectoryStream [dir filter])
 	(parsePath [path]
-      (log/info "parsing path" path)
-      (Path/of (if (.startsWith (str path) "/")
+      (log/info "parsePath" (type path) (str "\"" path "\""))
+      (resource-path path)
+      #_(Path/of (if (.startsWith (str path) "/")
                  (apply str (rest path))
                  (str path))
                 (make-array String 0)))
 	;(parsePath [uri])
 	(readAttributes [path attributes options]
-      (log/info "readingAttributes" path attributes options)
+      (log/info "readingAttributes" (type path) path attributes options)
       (try
-		(if-let [resource (clojure.java.io/resource (str path))]
-          (let [_ (log/info "resource" resource)
-				path (Path/of (.toURI resource))
-				_ (log/info "path" path)
+        (try
+		  (let [;_ (log/info "resource" resource)
+				;path (resource-path path)
+				;_ (log/info "path" path)
 				attributes (Files/readAttributes path attributes options)]
 			(log/info "attributes" attributes)
 			attributes)
-          (do
-            (log/info "Could not find resource" path)
-            {}))
+          (catch Exception e
+            (let [uri (.toURI (resource-url path))]
+			  (with-open [_ (FileSystems/newFileSystem uri {"create" "true"})]
+			    (Files/readAttributes (Paths/get uri) attributes options)))))
         (catch Exception e
+          (log/error "Error getting attributes for" path)
           (log/error e)
           {})))
 	;default Path 	readSymbolicLink(Path link)
